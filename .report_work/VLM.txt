@@ -1,0 +1,1370 @@
+CELL 0 markdown
+# AAA_VLM_EVAL
+
+Inference для validation split через дообученный LoRA-чекпоинт Qwen3-VL. Ноутбук берёт `valid_with_params.csv`, извлекает нужные изображения, загружает базовую `Qwen/Qwen3-VL-4B-Instruct` + последний `ckpt-step-*` из attached dataset и сохраняет JSON с ответами в `/kaggle/working`.
+CELL 1 code
+# Runtime dependencies. Keep imports that need these packages in later cells.
+import subprocess
+import sys
+
+PACKAGES = [
+    "transformers>=4.57.0,<5.0.0",
+    "accelerate>=1.12.0,<1.14.0",
+    "peft>=0.17.0,<0.19.0",
+    "bitsandbytes>=0.48.0,<0.49.0",
+    "safetensors>=0.6.0",
+    "huggingface_hub>=0.34.0,<1.0.0",
+    "qwen-vl-utils>=0.0.14,<0.1.0",
+]
+
+print("Installing/updating inference dependencies...")
+subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "--upgrade", *PACKAGES])
+print("Dependency install complete")
+
+Installing/updating inference dependencies...
+     ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 44.0/44.0 kB 1.6 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12.0/12.0 MB 98.8 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 59.4/59.4 MB 32.4 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 566.4/566.4 kB 25.8 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 12.2/12.2 MB 100.2 MB/s eta 0:00:00
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 35.4/35.4 MB 55.7 MB/s eta 0:00:00
+Dependency install complete
+
+
+ERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+dask-cuda 26.2.0 requires cuda-core==0.3.*, but you have cuda-core 1.0.1 which is incompatible.
+dask-cuda 26.2.0 requires numba-cuda<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+distributed-ucxx-cu12 0.48.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+cuml-cu12 26.2.0 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.
+cuml-cu12 26.2.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+ucxx-cu12 0.48.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+cudf-cu12 26.2.1 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.
+cudf-cu12 26.2.1 requires numba-cuda[cu12]<0.23.0,>=0.22.2, but you have numba-cuda 0.30.2 which is incompatible.
+
+
+CELL 2 code
+import gc
+import json
+import math
+import os
+import re
+import shutil
+import tarfile
+import time
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from PIL import Image
+
+INPUT_ROOT = Path("/kaggle/input")
+WORKING_ROOT = Path("/kaggle/working")
+TEMP_ROOT = Path("/kaggle/temp")
+WORKING_ROOT.mkdir(parents=True, exist_ok=True)
+TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+MODEL_ID = "Qwen/Qwen3-VL-4B-Instruct"
+MIN_PIXELS = 128 * 28 * 28
+MAX_PIXELS = 512 * 28 * 28
+MAX_NEW_TOKENS = 384
+GENERATION_KWARGS = {
+    "max_new_tokens": MAX_NEW_TOKENS,
+    "do_sample": True,
+    "temperature": 0.3,
+    "top_p": 0.7,
+    "repetition_penalty": 1.05,
+}
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+os.environ.setdefault("CUDA_MODULE_LOADING", "LAZY")
+os.environ.setdefault("TORCH_EXTENSIONS_DIR", str(TEMP_ROOT / "torch_extensions"))
+Path(os.environ["TORCH_EXTENSIONS_DIR"]).mkdir(parents=True, exist_ok=True)
+try:
+    Path("/root/.cache/torch/kernels").mkdir(parents=True, exist_ok=True)
+except Exception as exc:
+    print("kernel cache dir warning:", repr(exc))
+
+if not torch.cuda.is_available():
+    raise RuntimeError("CUDA недоступна: этот eval нужно запускать на GPU")
+
+try:
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
+
+device_count = torch.cuda.device_count()
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA device_count:", device_count)
+for i in range(device_count):
+    props = torch.cuda.get_device_properties(i)
+    print(f"GPU {i}: {props.name}, memory_gb={props.total_memory / 1024**3:.2f}")
+
+print("/kaggle/input top-level:")
+for p in sorted(INPUT_ROOT.iterdir()):
+    print(" -", p)
+
+CUDA available: True
+CUDA device_count: 2
+GPU 0: Tesla T4, memory_gb=14.56
+GPU 1: Tesla T4, memory_gb=14.56
+/kaggle/input top-level:
+ - /kaggle/input/datasets
+
+
+CELL 3 code
+def step_from_ckpt(path: Path) -> int:
+    m = re.search(r"ckpt-step-(\d+)$", path.name)
+    return int(m.group(1)) if m else -1
+
+
+def checkpoint_is_complete(path: Path) -> bool:
+    return (
+        path.is_dir()
+        and (path / "adapter_model.safetensors").exists()
+        and (path / "adapter_config.json").exists()
+    )
+
+
+def find_valid_csv() -> Path:
+    hits = sorted(INPUT_ROOT.rglob("valid_with_params.csv"))
+    if not hits:
+        raise FileNotFoundError("Не найден valid_with_params.csv в /kaggle/input")
+    return hits[0]
+
+
+def find_latest_checkpoint() -> Path:
+    hits = [p for p in INPUT_ROOT.rglob("ckpt-step-*") if checkpoint_is_complete(p)]
+    if not hits:
+        raise FileNotFoundError("Не найден полный ckpt-step-* с adapter_model.safetensors и adapter_config.json")
+    return max(hits, key=lambda p: step_from_ckpt(p))
+
+
+def find_image_archive() -> Path:
+    exact = [p for p in INPUT_ROOT.rglob("AAA_1image_dataset_images") if p.is_file()]
+    if exact:
+        return exact[0]
+
+    likely = []
+    for p in INPUT_ROOT.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        if "image" in name or "img" in name:
+            if p.suffix.lower() in {".tar", ".tgz", ".gz", ".zip", ""}:
+                likely.append(p)
+    for p in sorted(likely, key=lambda x: x.stat().st_size, reverse=True):
+        try:
+            if tarfile.is_tarfile(p):
+                return p
+        except Exception:
+            pass
+    raise FileNotFoundError("Не найден tar-архив с изображениями")
+
+VALID_CSV = find_valid_csv()
+CHECKPOINT_DIR = find_latest_checkpoint()
+CHECKPOINT_STEP = step_from_ckpt(CHECKPOINT_DIR)
+IMAGE_ARCHIVE = find_image_archive()
+
+OUTPUT_JSON = WORKING_ROOT / f"val_ckpt_step_{CHECKPOINT_STEP}.json"
+PARTIAL_JSON = WORKING_ROOT / f"val_ckpt_step_{CHECKPOINT_STEP}.partial.json"
+SUMMARY_JSON = WORKING_ROOT / f"val_ckpt_step_{CHECKPOINT_STEP}.summary.json"
+
+print("VALID_CSV:", VALID_CSV)
+print("CHECKPOINT_DIR:", CHECKPOINT_DIR)
+print("CHECKPOINT_STEP:", CHECKPOINT_STEP)
+print("IMAGE_ARCHIVE:", IMAGE_ARCHIVE, f"{IMAGE_ARCHIVE.stat().st_size / 1024**3:.2f} GB")
+print("OUTPUT_JSON:", OUTPUT_JSON)
+
+val_df = pd.read_csv(VALID_CSV)
+print("valid shape:", val_df.shape)
+print("valid columns:", list(val_df.columns))
+
+required_cols = {"item_id", "image_id", "title", "category_name", "params"}
+missing_cols = sorted(required_cols - set(val_df.columns))
+if missing_cols:
+    raise ValueError(f"В valid не хватает колонок: {missing_cols}")
+
+VAL_IMAGE_DIR = TEMP_ROOT / "aaa_val_images"
+VAL_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+wanted_image_ids = set(pd.to_numeric(val_df["image_id"], errors="raise").astype("int64"))
+existing_image_ids = {int(p.stem) for p in VAL_IMAGE_DIR.glob("*.jpg") if p.stem.isdigit()}
+missing_to_extract = wanted_image_ids - existing_image_ids
+print("нужно изображений:", len(wanted_image_ids), "уже извлечено:", len(existing_image_ids & wanted_image_ids), "осталось:", len(missing_to_extract))
+
+if missing_to_extract:
+    t0 = time.time()
+    extracted = 0
+    scanned_files = 0
+    with tarfile.open(IMAGE_ARCHIVE, "r:*") as tar:
+        for member in tar:
+            if not member.isfile():
+                continue
+            scanned_files += 1
+            stem = Path(member.name).stem
+            if not stem.isdigit():
+                continue
+            image_id = int(stem)
+            if image_id not in missing_to_extract:
+                continue
+            src = tar.extractfile(member)
+            if src is None:
+                continue
+            out_path = VAL_IMAGE_DIR / f"{image_id}.jpg"
+            with src, open(out_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            extracted += 1
+            if extracted % 20 == 0:
+                print(f"извлечено {extracted}/{len(missing_to_extract)}")
+            if extracted == len(missing_to_extract):
+                break
+    print(f"извлечено {extracted} изображений за {time.time() - t0:.1f} сек.; просмотрено файлов в tar: {scanned_files}")
+
+image_path_by_id = {int(p.stem): p for p in VAL_IMAGE_DIR.glob("*.jpg") if p.stem.isdigit()}
+missing_after = sorted(wanted_image_ids - set(image_path_by_id))
+print("изображений в индексе для valid:", len(set(image_path_by_id) & wanted_image_ids))
+print("missing_after:", missing_after[:10], "count=", len(missing_after))
+if missing_after:
+    raise FileNotFoundError(f"Не найдены изображения для {len(missing_after)} valid rows")
+
+sample_id = int(val_df.iloc[0]["image_id"])
+with Image.open(image_path_by_id[sample_id]) as img:
+    print("sample image:", image_path_by_id[sample_id], img.size, img.mode)
+
+VALID_CSV: /kaggle/input/datasets/kotshubin/aaa-1image-dataset-30k/valid_with_params.csv
+CHECKPOINT_DIR: /kaggle/input/datasets/kotshubin/aaa-vlm-sft-checkpoints/checkpoints/ckpt-step-3000
+CHECKPOINT_STEP: 3000
+IMAGE_ARCHIVE: /kaggle/input/datasets/kotshubin/aaa-1image-dataset-images/AAA_1image_dataset_images 10.73 GB
+OUTPUT_JSON: /kaggle/working/val_ckpt_step_3000.json
+valid shape: (100, 20)
+valid columns: ['item_id', 'image_id', 'title', 'description', 'category_id', 'category_name', 'microcat_id', 'microcat_name', 'itemstatus_id', 'price', 'imagescount', 'isshop', 'iscompany', 'hasbusinessprofile', 'reputationscore', 'starttime', 'quality_score', 'in_filtered_dataset', 'split', 'params']
+нужно изображений: 100 уже извлечено: 0 осталось: 100
+извлечено 20/100
+извлечено 40/100
+извлечено 60/100
+извлечено 80/100
+извлечено 100/100
+извлечено 100 изображений за 113.5 сек.; просмотрено файлов в tar: 258574
+изображений в индексе для valid: 100
+missing_after: [] count= 0
+sample image: /kaggle/temp/aaa_val_images/53318963226.jpg (480, 480) RGB
+
+
+CELL 4 code
+PROMPT_TEMPLATE = 'Ты пишешь товарное описание для объявления на Авито на русском языке.\n\n# Главный принцип\nЭто описание товара для покупателя, а не подпись к фотографии и не рекламный текст с догадками. Нужно ясно описать, что продаётся, в каком состоянии товар и какие характеристики указаны во входных данных.\n\nКаждое утверждение должно опираться на один из источников:\n1. `title`;\n2. `category_name`;\n3. `params`;\n4. товарно-значимая деталь самого товара, которую прямо видно на фотографии.\n\nЕсли утверждение нельзя проверить по этим данным — не пиши его. Лучше коротко перечислить подтверждённые свойства, чем добавлять красивую неподтверждённую фразу.\n\n# Что тебе дано\n1. **Фотография товара** (одно изображение).\n2. **Заголовок объявления** (`title`).\n3. **Категория** (`category_name`).\n4. **Характеристики** (`params`) — JSON-словарь со структурированными свойствами. Ключи не нормализованы: могут быть в форматах `с_подчёркиваниями`, `camelCase` или `с пробелами`. Используй их по смыслу.\n\n# Что нужно написать\nОдин абзац с товарным описанием:\n- начни с предмета продажи: тип товара, бренд, модель, версия, порода или категория — по `title` и `params`;\n- укажи состояние и 2–4 ключевые характеристики из `params`, если они есть;\n- используй фото только для важных свойств самого товара: цвет, материал, комплектность, заметные дефекты, общий внешний вид товара;\n- если фото даёт только фон/сцену/ракурс, игнорируй эти детали.\n\n# Как использовать фото\nФото помогает уточнить свойства товара, но не должно превращать ответ в описание картинки.\n\nИспользуй максимум 1–2 визуальных признака и только если они важны покупателю: цвет/окрас, материал, явная комплектность, явный дефект. Если визуальная деталь сомнительна или не влияет на покупку — пропусти её.\n\nПиши факт напрямую: «белый корпус», «зелёная дверь», «дымчато-серый окрас». Не ссылайся на источник факта.\n\nНельзя писать:\n- «на фото видно», «на фото виден», «видны», «указано», «указаны», «по описанию», «лежит», «стоит», «держат в руках»;\n- фон, покрывало, стол, пол, гараж, склад, руки, позу, ракурс, освещение, монитор рядом, поверхность под товаром;\n- очевидные мелочи вроде логотипа, вентиляционных решёток, складок фона, если это не ключевая характеристика товара.\n\n# Запрещённые неподтверждённые выводы\n- НЕ пиши «подходит», «подойдёт», «для дома», «для гаража», «для игр», «для установки», если это прямо не указано в `title` или `params`.\n- НЕ пиши «без повреждений», «без дефектов», «отличное внешнее состояние», «полный комплект», «оригинальный контроллер», «дверь в сборе», «без стекла», «без ручки», если это прямо не указано в `params` или `title`.\n- НЕ добавляй пустые общие фразы: «товар предназначен для использования», «подойдёт для покупки», «хороший вариант», «можно использовать по назначению».\n- Для животных НЕ пиши про здоровье, активность, характер, адаптацию, лоток, питание, прививки или готовность к переезду, если этого нет в `params` или `title`.\n- Для электроники НЕ пиши про работоспособность сверх того, что указано в `params`; если есть `состояние`, повтори его без расширения.\n- Для автозапчастей НЕ додумывай совместимость, комплектность, наличие/отсутствие стекла, ручек, креплений или историю использования, если этого нет во входных данных.\n\n# Общие запреты\n- НЕ додумывай сценарии использования, хранения, перевозки, ремонта, подарка или перепродажи.\n- НЕ приписывай товару качество, выгоду или эмоцию: «удобный», «практичный», «надёжный», «отличный вариант», «как новый», если это не подтверждено `params` или фото.\n- НЕ упоминай цену, скидки, способы оплаты, доставку, гарантии, контакты, ссылки, Telegram, WhatsApp, соцсети.\n- НЕ используй emoji, markdown-разметку, заголовки, маркированные списки.\n- НЕ повторяй `title` дословно как первую фразу.\n- НЕ пиши «Здравствуйте» / «Уважаемые покупатели».\n\n# Стиль и длина\nСтиль спокойный и естественный, как у продавца, который аккуратно перечисляет подтверждённые свойства товара. Без рекламных украшений. Не более 70 слов. Если данных мало — можно написать одно короткое предложение. Не добавляй финальную фразу ради красоты.\n\n# Формат вывода\nВыдай только текст описания. Без префикса «Описание:», без пояснений и рассуждений.\n\n# Данные товара\n**title:** {title}\n**category_name:** {category_name}\n**params:** {params}\n\nНапиши описание.'
+
+print("prompt chars:", len(PROMPT_TEMPLATE))
+print(PROMPT_TEMPLATE[:500], "...")
+
+prompt chars: 4272
+Ты пишешь товарное описание для объявления на Авито на русском языке.
+
+# Главный принцип
+Это описание товара для покупателя, а не подпись к фотографии и не рекламный текст с догадками. Нужно ясно описать, что продаётся, в каком состоянии товар и какие характеристики указаны во входных данных.
+
+Каждое утверждение должно опираться на один из источников:
+1. `title`;
+2. `category_name`;
+3. `params`;
+4. товарно-значимая деталь самого товара, которую прямо видно на фотографии.
+
+Если утверждение нельзя ...
+
+
+CELL 5 code
+from fnmatch import fnmatch
+
+MODEL_CACHE_ROOT = TEMP_ROOT / "hf_cache"
+MODEL_LOCAL_DIR = TEMP_ROOT / "qwen3_vl_4b_instruct"
+MODEL_DOWNLOAD_STATUS = WORKING_ROOT / "model_download_status.json"
+MODEL_CACHE_INFO_PATH = WORKING_ROOT / "model_cache_info.json"
+MODEL_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+MODEL_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+
+hf_env = {
+    "HF_HOME": str(MODEL_CACHE_ROOT),
+    "HF_HUB_CACHE": str(MODEL_CACHE_ROOT / "hub"),
+    "TRANSFORMERS_CACHE": str(MODEL_CACHE_ROOT / "transformers"),
+    "HF_HUB_DISABLE_XET": "1",
+    "HF_HUB_ETAG_TIMEOUT": "30",
+    "HF_HUB_DOWNLOAD_TIMEOUT": "600",
+}
+for key, value in hf_env.items():
+    os.environ[key] = value
+    print(f"HF env {key}={value}", flush=True)
+
+from huggingface_hub import hf_hub_download, model_info
+
+MODEL_ALLOW_PATTERNS = [
+    "*.safetensors",
+    "*.safetensors.index.json",
+    "*.json",
+    "*.txt",
+    "*.model",
+    "*.jinja",
+    "image_processing*.py",
+    "video_processing*.py",
+    "processing*.py",
+    "tokenization*.py",
+    "configuration*.py",
+    "modeling*.py",
+]
+MODEL_SKIP_PATTERNS = [
+    "*.md",
+    "*.gguf",
+    "*.onnx",
+    "*.tflite",
+    "*.msgpack",
+    "optimizer*",
+    "training_args*",
+]
+MODEL_FILE_TIMEOUT_SEC = 900
+
+
+def model_cache_ready(path: Path) -> bool:
+    has_config = (path / "config.json").exists()
+    has_weights = any(path.rglob("*.safetensors"))
+    tokenizer_markers = [
+        "tokenizer_config.json",
+        "tokenizer.json",
+        "vocab.json",
+        "merges.txt",
+        "tokenizer.model",
+    ]
+    processor_markers = ["preprocessor_config.json", "processor_config.json"]
+    has_tokenizer = any((path / name).exists() for name in tokenizer_markers)
+    has_processor = any((path / name).exists() for name in processor_markers)
+    return has_config and has_weights and has_tokenizer and has_processor
+
+
+def model_cache_score(path: Path) -> tuple[int, int]:
+    if not path.is_dir():
+        return (0, 0)
+    score = 0
+    if (path / "config.json").exists():
+        score += 1
+    if any(path.rglob("*.safetensors")):
+        score += 1
+    if any((path / name).exists() for name in ["tokenizer_config.json", "tokenizer.json", "vocab.json", "merges.txt", "tokenizer.model"]):
+        score += 1
+    if any((path / name).exists() for name in ["preprocessor_config.json", "processor_config.json"]):
+        score += 1
+    total_bytes = sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+    return (score, total_bytes)
+
+
+def find_mounted_base_model() -> Path | None:
+    candidates = []
+    for config_path in INPUT_ROOT.rglob("config.json"):
+        root = config_path.parent
+        if root == CHECKPOINT_DIR:
+            continue
+        if "aaa-vlm-sft-checkpoints" in str(root):
+            continue
+        if model_cache_ready(root):
+            candidates.append(root)
+    if not candidates:
+        return None
+    return max(candidates, key=model_cache_score)
+
+
+def should_download_model_file(name: str) -> bool:
+    if any(fnmatch(name, pattern) for pattern in MODEL_SKIP_PATTERNS):
+        return False
+    return any(fnmatch(name, pattern) for pattern in MODEL_ALLOW_PATTERNS)
+
+
+def write_download_status(payload: dict) -> None:
+    tmp_path = MODEL_DOWNLOAD_STATUS.with_suffix(MODEL_DOWNLOAD_STATUS.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(MODEL_DOWNLOAD_STATUS)
+
+
+def download_one_file_with_timeout(repo_id: str, filename: str, expected_size: int | None, index: int, total: int) -> Path:
+    import signal
+
+    class ModelFileTimeout(TimeoutError):
+        pass
+
+    def _handler(signum, frame):
+        raise ModelFileTimeout(f"timeout while downloading {filename} after {MODEL_FILE_TIMEOUT_SEC}s")
+
+    started = time.time()
+    print(
+        f"DOWNLOAD_START {index}/{total} file={filename} expected_mb={(expected_size or 0) / 1024**2:.1f}",
+        flush=True,
+    )
+    write_download_status({
+        "status": "downloading",
+        "repo_id": repo_id,
+        "file": filename,
+        "index": index,
+        "total": total,
+        "expected_size": expected_size,
+        "started_at_unix": started,
+    })
+
+    previous_handler = signal.signal(signal.SIGALRM, _handler)
+    signal.alarm(MODEL_FILE_TIMEOUT_SEC)
+    try:
+        local_path = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            local_dir=str(MODEL_LOCAL_DIR),
+            cache_dir=str(MODEL_CACHE_ROOT / "hub"),
+            local_files_only=False,
+        )
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+    local_path = Path(local_path)
+    elapsed = time.time() - started
+    actual_size = local_path.stat().st_size if local_path.exists() else None
+    print(
+        f"DOWNLOAD_DONE {index}/{total} file={filename} actual_mb={(actual_size or 0) / 1024**2:.1f} elapsed_sec={elapsed:.1f}",
+        flush=True,
+    )
+    write_download_status({
+        "status": "downloaded",
+        "repo_id": repo_id,
+        "file": filename,
+        "index": index,
+        "total": total,
+        "expected_size": expected_size,
+        "actual_size": actual_size,
+        "elapsed_sec": round(elapsed, 1),
+    })
+    return local_path
+
+
+def cache_model_from_hf(repo_id: str) -> dict:
+    print("MODEL_SOURCE: hf_download", repo_id, flush=True)
+    import signal
+
+    class ModelInfoTimeout(TimeoutError):
+        pass
+
+    def _info_timeout_handler(signum, frame):
+        raise ModelInfoTimeout(f"timeout while reading model_info for {repo_id}")
+
+    info_t0 = time.time()
+    print("MODEL_INFO_START", repo_id, flush=True)
+    previous_handler = signal.signal(signal.SIGALRM, _info_timeout_handler)
+    signal.alarm(120)
+    try:
+        info = model_info(repo_id=repo_id, files_metadata=True)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+    print("MODEL_INFO_DONE elapsed_sec=", round(time.time() - info_t0, 1), "siblings=", len(info.siblings), flush=True)
+
+    files = []
+    for sibling in info.siblings:
+        name = sibling.rfilename
+        if should_download_model_file(name):
+            files.append((name, getattr(sibling, "size", None)))
+    files = sorted(files, key=lambda x: (0 if x[0].endswith(".json") or x[0].endswith(".txt") else 1, x[0]))
+
+    if not files:
+        raise FileNotFoundError(f"Не нашёл файлов модели для скачивания в {repo_id}")
+
+    print("MODEL_DOWNLOAD_PLAN files=", len(files), "total_gb=", round(sum(size or 0 for _, size in files) / 1024**3, 3), flush=True)
+    for i, (name, size) in enumerate(files, start=1):
+        target = MODEL_LOCAL_DIR / name
+        if target.exists() and (size is None or target.stat().st_size == size):
+            print(f"DOWNLOAD_SKIP {i}/{len(files)} file={name} size_mb={target.stat().st_size / 1024**2:.1f}", flush=True)
+            continue
+        download_one_file_with_timeout(repo_id, name, size, i, len(files))
+
+    if not model_cache_ready(MODEL_LOCAL_DIR):
+        present = sorted(str(p.relative_to(MODEL_LOCAL_DIR)) for p in MODEL_LOCAL_DIR.rglob("*") if p.is_file())[:100]
+        raise FileNotFoundError(f"Model cache неполный после HF download: {MODEL_LOCAL_DIR}; first_files={present}")
+
+    return {"model_source": "hf_download", "model_dir": str(MODEL_LOCAL_DIR)}
+
+
+t0 = time.time()
+mounted_model_dir = find_mounted_base_model()
+if mounted_model_dir is not None:
+    MODEL_LOCAL_DIR = mounted_model_dir
+    source_info = {"model_source": "mounted_input", "model_dir": str(MODEL_LOCAL_DIR)}
+    print("MODEL_SOURCE: mounted_input", MODEL_LOCAL_DIR, flush=True)
+elif model_cache_ready(MODEL_LOCAL_DIR):
+    source_info = {"model_source": "temp_cache_existing", "model_dir": str(MODEL_LOCAL_DIR)}
+    print("MODEL_SOURCE: temp_cache_existing", MODEL_LOCAL_DIR, flush=True)
+else:
+    source_info = cache_model_from_hf(MODEL_ID)
+
+files = [p for p in MODEL_LOCAL_DIR.rglob("*") if p.is_file()]
+safetensors = [p for p in files if p.suffix == ".safetensors"]
+cache_info = {
+    "model_id": MODEL_ID,
+    "model_local_dir": str(MODEL_LOCAL_DIR),
+    "model_source": source_info["model_source"],
+    "files_count": len(files),
+    "safetensors_count": len(safetensors),
+    "total_gb": round(sum(p.stat().st_size for p in files) / 1024**3, 3),
+    "elapsed_sec": round(time.time() - t0, 1),
+    "checks": {
+        "config_json": (MODEL_LOCAL_DIR / "config.json").exists(),
+        "has_safetensors": bool(safetensors),
+        "tokenizer_config_json": (MODEL_LOCAL_DIR / "tokenizer_config.json").exists(),
+        "preprocessor_config_json": (MODEL_LOCAL_DIR / "preprocessor_config.json").exists(),
+        "processor_config_json": (MODEL_LOCAL_DIR / "processor_config.json").exists(),
+    },
+}
+MODEL_CACHE_INFO_PATH.write_text(json.dumps(cache_info, ensure_ascii=False, indent=2), encoding="utf-8")
+print("Model cache ready:")
+print(json.dumps(cache_info, ensure_ascii=False, indent=2), flush=True)
+if not model_cache_ready(MODEL_LOCAL_DIR):
+    raise FileNotFoundError(f"Model cache неполный: {MODEL_LOCAL_DIR}")
+
+HF env HF_HOME=/kaggle/temp/hf_cache
+HF env HF_HUB_CACHE=/kaggle/temp/hf_cache/hub
+HF env TRANSFORMERS_CACHE=/kaggle/temp/hf_cache/transformers
+HF env HF_HUB_DISABLE_XET=1
+HF env HF_HUB_ETAG_TIMEOUT=30
+HF env HF_HUB_DOWNLOAD_TIMEOUT=600
+MODEL_SOURCE: hf_download Qwen/Qwen3-VL-4B-Instruct
+MODEL_INFO_START Qwen/Qwen3-VL-4B-Instruct
+MODEL_INFO_DONE elapsed_sec= 0.1 siblings= 14
+MODEL_DOWNLOAD_PLAN files= 12 total_gb= 8.277
+DOWNLOAD_START 1/12 file=chat_template.json expected_mb=0.0
+
+
+
+chat_template.json: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 1/12 file=chat_template.json actual_mb=0.0 elapsed_sec=0.1
+DOWNLOAD_START 2/12 file=config.json expected_mb=0.0
+
+
+
+config.json: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 2/12 file=config.json actual_mb=0.0 elapsed_sec=0.1
+DOWNLOAD_START 3/12 file=generation_config.json expected_mb=0.0
+
+
+
+generation_config.json:   0%|          | 0.00/269 [00:00<?, ?B/s]
+DOWNLOAD_DONE 3/12 file=generation_config.json actual_mb=0.0 elapsed_sec=0.1
+DOWNLOAD_START 4/12 file=merges.txt expected_mb=1.6
+
+
+
+merges.txt: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 4/12 file=merges.txt actual_mb=1.6 elapsed_sec=0.1
+DOWNLOAD_START 5/12 file=model.safetensors.index.json expected_mb=0.1
+
+
+
+model.safetensors.index.json: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 5/12 file=model.safetensors.index.json actual_mb=0.1 elapsed_sec=0.1
+DOWNLOAD_START 6/12 file=preprocessor_config.json expected_mb=0.0
+
+
+
+preprocessor_config.json:   0%|          | 0.00/390 [00:00<?, ?B/s]
+DOWNLOAD_DONE 6/12 file=preprocessor_config.json actual_mb=0.0 elapsed_sec=0.1
+DOWNLOAD_START 7/12 file=tokenizer.json expected_mb=6.7
+
+
+
+tokenizer.json: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 7/12 file=tokenizer.json actual_mb=6.7 elapsed_sec=0.2
+DOWNLOAD_START 8/12 file=tokenizer_config.json expected_mb=0.0
+
+
+
+tokenizer_config.json: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 8/12 file=tokenizer_config.json actual_mb=0.0 elapsed_sec=0.1
+DOWNLOAD_START 9/12 file=video_preprocessor_config.json expected_mb=0.0
+
+
+
+video_preprocessor_config.json:   0%|          | 0.00/385 [00:00<?, ?B/s]
+DOWNLOAD_DONE 9/12 file=video_preprocessor_config.json actual_mb=0.0 elapsed_sec=0.1
+DOWNLOAD_START 10/12 file=vocab.json expected_mb=2.6
+
+
+
+vocab.json: 0.00B [00:00, ?B/s]
+DOWNLOAD_DONE 10/12 file=vocab.json actual_mb=2.6 elapsed_sec=0.1
+DOWNLOAD_START 11/12 file=model-00001-of-00002.safetensors expected_mb=4737.1
+
+
+
+model-00001-of-00002.safetensors:   0%|          | 0.00/4.97G [00:00<?, ?B/s]
+DOWNLOAD_DONE 11/12 file=model-00001-of-00002.safetensors actual_mb=4737.1 elapsed_sec=67.0
+DOWNLOAD_START 12/12 file=model-00002-of-00002.safetensors expected_mb=3727.4
+
+
+
+model-00002-of-00002.safetensors:   0%|          | 0.00/3.91G [00:00<?, ?B/s]
+DOWNLOAD_DONE 12/12 file=model-00002-of-00002.safetensors actual_mb=3727.4 elapsed_sec=24.5
+Model cache ready:
+{
+  "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+  "model_local_dir": "/kaggle/temp/qwen3_vl_4b_instruct",
+  "model_source": "hf_download",
+  "files_count": 25,
+  "safetensors_count": 2,
+  "total_gb": 8.277,
+  "elapsed_sec": 92.9,
+  "checks": {
+    "config_json": true,
+    "has_safetensors": true,
+    "tokenizer_config_json": true,
+    "preprocessor_config_json": true,
+    "processor_config_json": false
+  }
+}
+
+
+CELL 6 code
+from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+from peft import PeftModel
+
+try:
+    from transformers import Qwen3VLForConditionalGeneration
+except Exception:
+    Qwen3VLForConditionalGeneration = None
+
+
+def get_model_class():
+    if Qwen3VLForConditionalGeneration is not None:
+        return Qwen3VLForConditionalGeneration, "Qwen3VLForConditionalGeneration"
+    return AutoModelForImageTextToText, "AutoModelForImageTextToText"
+
+model_cls, model_cls_name = get_model_class()
+print("model class:", model_cls_name)
+print("loading processor...")
+t0 = time.time()
+processor = AutoProcessor.from_pretrained(
+    str(MODEL_LOCAL_DIR),
+    trust_remote_code=True,
+    min_pixels=MIN_PIXELS,
+    max_pixels=MAX_PIXELS,
+    local_files_only=True,
+)
+tokenizer = getattr(processor, "tokenizer", None)
+if tokenizer is not None and tokenizer.pad_token_id is None:
+    tokenizer.pad_token = tokenizer.eos_token
+print("processor loaded elapsed_sec:", round(time.time() - t0, 1))
+
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=torch.float16,
+)
+
+print("loading base model 4-bit...")
+t0 = time.time()
+base_model = model_cls.from_pretrained(
+    str(MODEL_LOCAL_DIR),
+    quantization_config=bnb_config,
+    torch_dtype=torch.float16,
+    device_map={"": 0},
+    trust_remote_code=True,
+    local_files_only=True,
+)
+print("base model loaded elapsed_sec:", round(time.time() - t0, 1))
+print("CUDA after base load allocated_gb=", round(torch.cuda.memory_allocated(0) / 1024**3, 2), "reserved_gb=", round(torch.cuda.memory_reserved(0) / 1024**3, 2))
+
+print("loading LoRA checkpoint:", CHECKPOINT_DIR)
+t0 = time.time()
+model = PeftModel.from_pretrained(base_model, str(CHECKPOINT_DIR), is_trainable=False)
+model.eval()
+print("LoRA loaded elapsed_sec:", round(time.time() - t0, 1))
+print("CUDA after LoRA allocated_gb=", round(torch.cuda.memory_allocated(0) / 1024**3, 2), "reserved_gb=", round(torch.cuda.memory_reserved(0) / 1024**3, 2))
+
+/usr/local/lib/python3.12/dist-packages/transformers/utils/hub.py:110: FutureWarning: Using `TRANSFORMERS_CACHE` is deprecated and will be removed in v5 of Transformers. Use `HF_HOME` instead.
+  warnings.warn(
+2026-06-08 06:30:48.267872: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1780900248.638653      24 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1780900248.769967      24 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1780900250.043028      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1780900250.043067      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1780900250.043070      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1780900250.043072      24 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+
+
+model class: Qwen3VLForConditionalGeneration
+loading processor...
+
+
+`torch_dtype` is deprecated! Use `dtype` instead!
+
+
+processor loaded elapsed_sec: 1.0
+loading base model 4-bit...
+
+
+
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]
+base model loaded elapsed_sec: 17.1
+CUDA after base load allocated_gb= 2.71 reserved_gb= 4.21
+loading LoRA checkpoint: /kaggle/input/datasets/kotshubin/aaa-vlm-sft-checkpoints/checkpoints/ckpt-step-3000
+LoRA loaded elapsed_sec: 3.2
+CUDA after LoRA allocated_gb= 2.83 reserved_gb= 4.46
+
+
+CELL 7 code
+def json_safe(value):
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        if math.isnan(float(value)):
+            return None
+        return float(value)
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if pd.isna(value):
+        return None
+    return value
+
+
+def row_to_record(row: pd.Series) -> dict:
+    return {col: json_safe(row[col]) for col in val_df.columns}
+
+
+def write_json(path: Path, records: list[dict]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def model_device() -> torch.device:
+    for param in model.parameters():
+        return param.device
+    return torch.device("cuda:0")
+
+
+@torch.inference_mode()
+def generate_description(image: Image.Image, title: str, category: str, params: str) -> str:
+    user_text = PROMPT_TEMPLATE.format(title=title, category_name=category, params=params)
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": user_text},
+            ],
+        }
+    ]
+    inputs = processor.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=True,
+        return_dict=True,
+        return_tensors="pt",
+    ).to(model_device())
+
+    out_ids = model.generate(**inputs, **GENERATION_KWARGS)
+    gen_only = out_ids[:, inputs["input_ids"].shape[1]:]
+    return processor.batch_decode(gen_only, skip_special_tokens=True)[0].strip()
+
+records = []
+print("Начинаю генерацию valid JSON:", len(val_df), "строк")
+total_t0 = time.time()
+
+for n, (idx, row) in enumerate(val_df.iterrows(), start=1):
+    image_id = int(row["image_id"])
+    image_path = image_path_by_id[image_id]
+    record = row_to_record(row)
+    record["checkpoint_step"] = CHECKPOINT_STEP
+    record["checkpoint_name"] = CHECKPOINT_DIR.name
+    record["model_id"] = MODEL_ID
+    record["generation_kwargs"] = GENERATION_KWARGS
+    record["qwen_sft_response"] = ""
+    record["qwen_sft_error"] = ""
+    record["qwen_sft_seconds"] = None
+
+    try:
+        with Image.open(image_path) as img:
+            image = img.convert("RGB")
+        t0 = time.time()
+        pred = generate_description(
+            image=image,
+            title=str(row["title"]),
+            category=str(row["category_name"]),
+            params=str(row["params"]),
+        )
+        dt = time.time() - t0
+        record["qwen_sft_response"] = pred
+        record["qwen_sft_seconds"] = round(dt, 3)
+        print(f"[{n:03d}/{len(val_df)}] item_id={row['item_id']} image_id={image_id} {dt:.1f}s {len(pred)} chars | {pred[:140]}", flush=True)
+    except Exception as exc:
+        record["qwen_sft_error"] = repr(exc)
+        print(f"[{n:03d}/{len(val_df)}] ERROR item_id={row['item_id']} image_id={image_id}: {exc!r}", flush=True)
+    finally:
+        records.append(record)
+        if n % 5 == 0 or n == len(val_df):
+            write_json(PARTIAL_JSON, records)
+            filled = sum(bool(r.get("qwen_sft_response")) for r in records)
+            errors = sum(bool(r.get("qwen_sft_error")) for r in records)
+            print("partial saved:", PARTIAL_JSON, "records:", len(records), "filled:", filled, "errors:", errors, flush=True)
+        if torch.cuda.is_available() and n % 10 == 0:
+            torch.cuda.empty_cache()
+
+write_json(OUTPUT_JSON, records)
+summary = {
+    "model_id": MODEL_ID,
+    "checkpoint_dir": str(CHECKPOINT_DIR),
+    "checkpoint_step": CHECKPOINT_STEP,
+    "valid_csv": str(VALID_CSV),
+    "rows": len(records),
+    "filled": sum(bool(r.get("qwen_sft_response")) for r in records),
+    "errors": sum(bool(r.get("qwen_sft_error")) for r in records),
+    "output_json": str(OUTPUT_JSON),
+    "partial_json": str(PARTIAL_JSON),
+    "generation_kwargs": GENERATION_KWARGS,
+    "elapsed_min": round((time.time() - total_t0) / 60, 2),
+}
+SUMMARY_JSON.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+print("Готово:")
+print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+Начинаю генерацию valid JSON: 100 строк
+[001/100] item_id=2378334500700 image_id=53318963226 65.8s 884 chars | Характеристики модели
+
+— Цвет ремешка: Красный
+— Ширина: 26mm
+
+Общие характеритики
+
+— Название бренда: NNNB
+— Номер модели: For Garmin Fenix
+[002/100] item_id=2199744251400 image_id=47771469743 7.8s 84 chars | Продам приборную панель мопеда альфа. 
+В хорошем состоянии, без видимых повреждений.
+[003/100] item_id=2342625000700 image_id=52247113010 61.9s 550 chars | Новый водяной насос C7; 3126 352-2139
+
+В наличии на складе в Москве, доставка в день заказа.
+
+ДВС, двигатель, насос, водяной, водяной насос,
+[004/100] item_id=2289877750600 image_id=50857936136 61.8s 873 chars | Монтаж и производство монолитного профилированного поликарбоната от производителя за 1 день! 
+Ваша задача — выбрать размеры и цвет, а наша —
+[005/100] item_id=2347641000100 image_id=52451383516 62.4s 1045 chars | Новый iPhone 14 Pro 512GB
+
+✅ Оригинальный телефон с заводской гарантией
+
+✅ В наличии на складе в Москве
+
+✅ Бесплатная доставка по городу
+
+✅ 
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 5 filled: 5 errors: 0
+[006/100] item_id=2280781001000 image_id=50563799251 61.1s 759 chars | Стартер Japanparts MTD216
+
+— Производитель: Japanparts
+— Аналоги: J5211071, 003-D216, ADN11242
+— Подходит на: NISSAN PRIMERA 1.6 16V
+— Номер
+[007/100] item_id=2322036751800 image_id=51416139803 62.4s 1246 chars | Мат из пеноплекса — тепло, звукоизоляция и защита от влаги
+
+Пеноплекс — это современный строительный материал, который сочетает в себе тепло
+[008/100] item_id=2222433000400 image_id=48773340532 22.1s 422 chars | Продаются оригинальные мужские ботинки Nike hoodland suede размера 39. Изготовлены из натурального нубука черного цвета, что обеспечивает ко
+[009/100] item_id=2227501252600 image_id=48949845659 14.6s 215 chars | Продаются новые шины Nexen Roadian GTX 265/60R18, изготовленные в Корее. 
+Шины были установлены в 2020 году и использовались в качестве зимн
+[010/100] item_id=2238846750500 image_id=49368081030 61.7s 878 chars | Характеристики модели
+
+— Цвет: 1-1
+— Тип: гирлянда
+
+Общие характеритики
+
+— Название бренда: NNNB
+— Происхождение: Китай
+— Тип товара: нового
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 10 filled: 10 errors: 0
+[011/100] item_id=2321004001000 image_id=51641250006 61.6s 927 chars | Артикул товара №652
+
+Усилитель бампера передний Infiniti M35 M45 Y50 VQ35HR 2008 (не ржавый)
+
+Марка: Infiniti
+Модель: M35 M45
+Год: 2008
+Кузо
+[012/100] item_id=2301499750700 image_id=51245994007 62.0s 960 chars | — Артикул запчасти: 20921997
+
+— Номер и производитель: 31346N Toyota
+
+— Марка автомобиля: Toyota
+
+— Модель автомобиля: Corolla Verso
+
+— Год:
+[013/100] item_id=2344239251000 image_id=52142430850 62.3s 866 chars | Глушитель VW Jetta (11-) 1.6i 16v CFNA ОСН. (АЛЮМИНИЗИРОВАННАЯ СТАЛЬ) 1090mm
+
+✅ Оплата: Наличными, переводом, картой, QR-кодом, по счету для
+[014/100] item_id=2288286750300 image_id=50818941566 61.9s 1403 chars | 🎮 Игра Five Nights at Freddy’s: Help Wanted – Full Time Edition PS4 VR1
+
+🎮 Игра Five Nights at Freddy’s: Help Wanted – Full Time Edition PS4
+[015/100] item_id=2115334001300 image_id=44662460001 35.2s 590 chars | Продам фотокамеру Fujifilm FinePix S9200 в отличном состоянии. 
+Все работает идеально, без каких-либо повреждений. 
+Камера оснащена 16.8-мег
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 15 filled: 15 errors: 0
+[016/100] item_id=2235306002600 image_id=48946642296 62.3s 1196 chars | Виниловая пластинка Electronic - Twisted Tenderness (Black Vinyl 2LP)
+
+В наличии новый виниловый диск! 
+Диск в наличии на складе в Москве, д
+[017/100] item_id=2215997250700 image_id=48469863683 61.5s 1130 chars | пороги на машины Daewoo
+
+Мы — ваш надежный поставщик качественных кузовных элементов для автомобилей! 🚗🔧
+
+Наши изделия выполнены по оригинал
+[018/100] item_id=2239086501000 image_id=49270306466 44.7s 617 chars | Опора двигателя Hyundai: Tucson 04-, Kia: Sportage II 04- (M8080411)
+
+Артикул: M8080411
+
+Опора двигателя подходит:
+Hyundai Tucson 1 поколени
+[019/100] item_id=2112521000100 image_id=46540373161 56.0s 1059 chars | Продам свой автомобиль в хорошем состоянии, в нем был один владелец. 
+Двигатель работает идеально, трансмиссия без нареканий. 
+Все функции р
+[020/100] item_id=2201440500300 image_id=47836963914 12.2s 207 chars | Новое боди зеленого цвета, размер 52-54. Изготовлено из качественного материала, обеспечивающего комфорт и долговечность. Подходит для разли
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 20 filled: 20 errors: 0
+[021/100] item_id=2288604250200 image_id=50237755881 62.2s 838 chars | Бренд: Sakura, артикул: A6607, Фильтр воздушный CHRYSLER SEBRING (JR), SEBRING Кабриолет (JR), DODGE STRATUS II, GAZ VOLGA SIBER. 
+Все заказ
+[022/100] item_id=2165333750400 image_id=46319731859 62.3s 988 chars | Беседка деревянная с доставкой
+
+Все работы выполняются в срок от 5 дней! 
+Работаем с 2017 года!
+
+✅ Бесплатный выезд замерщика на ваш участок
+[023/100] item_id=2167813750900 image_id=46556896504 9.3s 96 chars | Продам детскую куртку от baby go. 
+Ветровка с капюшоном, застегивается на молнию. 
+Размер 86 см.
+[024/100] item_id=2179523500300 image_id=46953432744 15.2s 275 chars | Продаются зимние детские сапоги Nordman размером 24, предназначенные для девочек. Состояние хорошее, сапоги надевались несколько раз. Внутри
+[025/100] item_id=2167233251300 image_id=46538860185 61.9s 864 chars | Магнитола Android 10-12 2/32 Volkswagen Touareg 1
+
+✅ В наличии! ✅ Срок изготовления 1 день ✅ Оплата после получения ✅ Доставка по всей Росси
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 25 filled: 25 errors: 0
+[026/100] item_id=2176829000900 image_id=46872516225 48.5s 986 chars | Продается уютная двухкомнатная квартира в современном доме с развитой инфраструктурой. Квартира расположена на 8 этаже, что обеспечивает ком
+[027/100] item_id=2177455502000 image_id=46885835091 14.7s 269 chars | Продаются б/у кроссовки для мальчика размером 36. Эти кроссовки были использованы всего один сезон, после чего ребенок вырос. Кроссовки в хо
+[028/100] item_id=2289743001600 image_id=50852315569 61.8s 818 chars | 📱 Xiaomi Redmi A3x — стильный и мощный смартфон с 8-ядерным процессором и 64 ГБ памяти. 
+
+✅ Основные характеристики:
+
+— Версия ОС: Android 1
+[029/100] item_id=2182454503600 image_id=47055646233 62.1s 912 chars | 🚗 Автомобиль Belgee X50 Prestige 1.5 AMT 2025 года выпуска
+
+✅ Комплектация:
+— Роботизированная коробка передач
+— Премиум-комплектация Presti
+[030/100] item_id=2124977250200 image_id=44976705047 32.1s 420 chars | — Артикул: 17331
+
+— Номер и производитель: 3C0820743BQ VAG
+
+— Марка: Volkswagen
+
+— Модель: Passat
+
+— Кузов: B6
+
+— Двигатель: 1.8T BZB
+
+— Год
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 30 filled: 30 errors: 0
+[031/100] item_id=2253128250300 image_id=49800839223 37.3s 561 chars | Осень резино-жгутовая Knott VG 18MV b1600, c2070
+
+Артикул: 6A0788.052
+
+Осень резино-жгутовая Knott VG 18MV b1600, c2070 предназначена для ра
+[032/100] item_id=2348581000800 image_id=52477876184 62.1s 841 chars | — Артикул запчасти: 21050527
+
+— Марка: Mercedes
+
+— Модель: A W168
+
+— Год: 2004
+
+— Кузов: Хэтчбэк 5 дв.
+
+— Двигатель: M166.940
+
+— Тип двигате
+[033/100] item_id=2324183000200 image_id=51697725684 13.2s 144 chars | Продаю джинсовую юбку миди, размер 44 (L). Подходит на 94-98 см по бедрам и 66-70 см по талии. Юбка в идеальном состоянии, без видимых дефек
+[034/100] item_id=2306591251100 image_id=49817361018 18.3s 211 chars | Бренд: ZF Russia, артикул: 3000950072ZFR, Комплект сцепления AUDI A3 (8P1), A3 (8V1, 8VK). 
+Новый! Оригинальный товар, прямые поставки из Ев
+[035/100] item_id=2337687001900 image_id=52292230997 62.1s 1130 chars | Расстоечный шкаф Unox XEBPL-16EU-M
+
+✅ Оплата после получения и проверки товара
+✅ Доставка по всей России
+✅ Гарантия 1 год
+✅ Бесплатная доста
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 35 filled: 35 errors: 0
+[036/100] item_id=2196518001100 image_id=47603148874 25.2s 437 chars | Продам танцевальный костюм для девочки размером 140 см. Костюм выполнен в ярком вишнёвом цвете, что делает его заметным и стильным. Верхняя 
+[037/100] item_id=2296558000500 image_id=51043524868 7.4s 82 chars | Продам одежду для мальчиков от 6 до 12 месяцев. В хорошем состоянии, без дефектов.
+[038/100] item_id=2333027250100 image_id=51950508237 62.0s 871 chars | Артикул запчасти: 21000974.
+
+Зеркало боковое левая  Land Rover Freelander 1 2005-2012 TD4 204D3 2    Марка: Land Rover
+Модель: Freelander 1 
+[039/100] item_id=2161593750500 image_id=46316291680 61.7s 930 chars | Артикул товара №61539640
+
+Накладка на порог (наружная) BMW 5-Series
+
+Накладка на порог (наружная) BMW 5-Series
+
+Накладка на порог (наружная)
+[040/100] item_id=2291851751500 image_id=50919472743 19.6s 332 chars | Продаю перфоратор Hitachi DH45MR. 
+В отличном состоянии, без видимых повреждений. 
+Работает мощно и стабильно, идеально подходит для сверлен
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 40 filled: 40 errors: 0
+[041/100] item_id=2305868501400 image_id=51266603309 35.8s 640 chars | Картина маслом «Бархатная страсть» — это произведение Жени, созданное с любовью и вниманием к деталям. Картина выполнена в технике импрессио
+[042/100] item_id=2359559000700 image_id=52820729605 11.1s 132 chars | Продаю тормозную трубку Renault Megane 3/Fluence. 
+Оригинальный номер: 463150252R
+
+В хорошем состоянии, использовалась в автомобиле.
+[043/100] item_id=2308704750400 image_id=51366089636 19.9s 324 chars | Продам толстовки Gloria Jeans в отличном состоянии. Размер 140 см (8-10 лет). Чёрная толстовка с графическим принтом и надписями, а также с 
+[044/100] item_id=2344987751300 image_id=52332641090 61.7s 886 chars | Артикул запчасти: 21032605.
+
+Мост (ведущий) задний   Mitsubishi L200 1998-2006 4D56 2.5    Марка: Mitsubishi
+Модель: L200 1998-2006
+Год: 200
+[045/100] item_id=2327354250600 image_id=51786459377 6.5s 73 chars | Продаются новые рюмки, которые были в подарок от бабушки. В наличии 6 шт.
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 45 filled: 45 errors: 0
+[046/100] item_id=2342140001700 image_id=52232979837 8.1s 83 chars | Цветущий спатифиллум Моджо,не подходит для комнатного размещения,т.к.не любит свет.
+[047/100] item_id=2287501500500 image_id=50797966987 61.8s 1171 chars | Карбоновый диффузор BMW M8, кованный карбон, SQ
+
+Карбоновый диффузор BMW M8, кованный карбон, SQ
+
+Карбоновый диффузор для BMW M8 (F91/F92/F9
+[048/100] item_id=2172945750900 image_id=49113302919 10.6s 101 chars | Пижама next 128 для мальчика. 
+Шорты+футболка. 
+Материал хлопок. 
+Возраст 8 лет. 
+Подходит на 128 см.
+[049/100] item_id=2171355751400 image_id=46728112871 61.3s 905 chars | Фара противотуманная Kia Sportage 2015-2019 правая (копия)
+
+Артикул: ST-223-2043R
+
+Все заказы оформляются только через Авито доставку!
+Более
+[050/100] item_id=2324730001100 image_id=50635460927 61.4s 533 chars | ВАЗ (LADA) Vesta 1.6 MT, 2026
+
+✅ ГАРАНТИЯ НА РАБОТЫ МАШИНЫ ОТ ПРОДАВЦА
+✅ ОПЛАТА ПРИ ПОЛУЧЕНИИ
+✅ БЕСПЛАТНАЯ ДОСТАВКА
+✅ СКИДКА НА ПОКУПКУ
+✅ ПО
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 50 filled: 50 errors: 0
+[051/100] item_id=2193543751600 image_id=46433894392 61.4s 1167 chars | пороги для Mitsubishi Outlander (2002-2009)
+
+🚚 Отправка в день заказа
+
+✅ Гарантия качества
+
+✅ Оплата только после получения
+
+✅ Бесплатная до
+[052/100] item_id=2194781250400 image_id=47538807480 62.0s 1256 chars | Клык рыхлитель скальный (однозубый) Crush
+
+Клык рыхлитель скальный (однозубый) Crush — это надежное решение для работы с твердыми и скальным
+[053/100] item_id=2007507500500 image_id=41117009387 61.7s 856 chars | Шаровая опора CB0252 CTR
+
+Применяемость:
+Mitsubishi: Galant 01.01-03 - Usa, Grandis 03-11, Space Wagon 04-13
+
+Все заказы оформляются только 
+[054/100] item_id=2330612250500 image_id=51868307230 16.7s 288 chars | Продаются новые сценические фонтаны серебристого цвета, размером 3 метра. Эти фонтаны работают в течение 30 секунд, создавая эффект водной с
+[055/100] item_id=2184848250900 image_id=47147824877 61.2s 1178 chars | Оргстекло экструзионное ACRYMA 72 (УФ) 2 мм от производителя Полимакс
+
+✅ Оргстекло экструзионное ACRYMA 72 (УФ) 2 мм — это прозрачное оргсте
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 55 filled: 55 errors: 0
+[056/100] item_id=2362229000300 image_id=52396805521 61.7s 936 chars | Раздвижные двери VEKA ПВХ в наличии
+
+🔥 Скидка до 50% на установку! 🔥
+
+✅ Оплата при получении
+✅ Гарантия 5 лет
+✅ Бесплатный выезд замерщика
+✅
+[057/100] item_id=2238294251000 image_id=49350673253 15.0s 248 chars | Продам игру The Last of Us Part 1 PS5 в отличном состоянии. 
+Все работает идеально, без ошибок и зависаний. 
+Качество графики высокое, анима
+[058/100] item_id=2335962001300 image_id=52033167483 28.9s 491 chars | Продается льняная рубашка Vilebrequin, купленная в 2023 году за 80 тысяч рублей. Рубашка выполнена из натурального льна, что обеспечивает ко
+[059/100] item_id=2136396751500 image_id=45331808548 61.7s 831 chars | Артикул запчасти: 20391084.
+
+Амортизатор подвески левая перед. BMW X5 E70 2008-2015 N63B44A 4.4    Марка: BMW
+Модель: X5 E70 2008-2015
+Год: 
+[060/100] item_id=2171984001800 image_id=46747895015 7.6s 91 chars | Продам комплект из 3 рубашек Janie and jack, на 4 года. В отличном состоянии, без дефектов.
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 60 filled: 60 errors: 0
+[061/100] item_id=2180977008000 image_id=50524958002 37.5s 509 chars | Артикул: 2401/0245
+
+Уплотнительное кольцо JCB 2401/0245
+
+Все детали в наличии на складе в Москве либо под заказ за 1 день. 
+Доставка по горо
+[062/100] item_id=2154199000700 image_id=46011694119 61.7s 1264 chars | Кран-манипулятор XCMG XCT25L4SR 2024 года выпуска — надежный помощник в строительстве и монтаже. Этот кран отличается своей универсальностью
+[063/100] item_id=2214509251000 image_id=48405426596 15.7s 252 chars | Продам брюки для прогулок на мальчика, размером 9-10 лет (134-140 см). Изготовлены из флиса серого цвета, что обеспечивает комфорт при движе
+[064/100] item_id=2333434500100 image_id=51968456131 61.6s 829 chars | Продам одежду пакетом для девочки 116 см. 
+Все вещи б/у, но в хорошем состоянии. 
+В наличии: 
+- куртка C&A 
+- платье C&A 
+- толстовка C&A 
+-
+[065/100] item_id=2191312750500 image_id=47254055042 58.6s 1145 chars | Артикул товара №10909
+
+Помпа водяная YC4A105Z-T20
+
+Детали ДВС | Помпа ручной подкачки
+
+Помпа водяная YC4A105Z-T20. 
+Магазин автозапчастей пр
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 65 filled: 65 errors: 0
+[066/100] item_id=2289140250500 image_id=50840228592 15.3s 220 chars | Продаются б/у подушки на стул Justina. В наличии 4 штуки. Размер каждой 42/35x40x4 см. Цвет бежево-белые, с небольшими пятнами, которые не в
+[067/100] item_id=2377940500300 image_id=53298051549 62.0s 881 chars | Артикул запчасти: 21129873.
+
+Вентилятор радиатора   Chrysler Voyager 1995-2006 EDZ 2    Марка: Chrysler
+Модель: Voyager 1995-2006
+Год: 2002
+
+[068/100] item_id=2277747000100 image_id=50480109065 9.7s 127 chars | Продаю разделочную доску деревянную, сделанную ручной работы. 
+В отличном состоянии, использовалась редко. 
+Толщина доски 2 см.
+[069/100] item_id=2199403750100 image_id=47764109662 62.0s 980 chars | Аккумуляторный заклёпочный пистолет Nanwei LQ95TH1FQN
+
+✅ Бесплатная доставка до транспортной компании
+
+✅ Гарантия на весь ассортимент
+
+✅ Опл
+[070/100] item_id=2166596757000 image_id=46514677399 61.6s 1175 chars | Облицовочный кирпич
+
+🔥 Огромный ассортимент строительных материалов в наличии и под заказ! 🔥
+
+✅ Более 10 лет опыта работы в сфере строительс
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 70 filled: 70 errors: 0
+[071/100] item_id=2294272250300 image_id=50951141625 19.9s 275 chars | Продаются таблички с номером дома из алюминиевого композита и пластика. 
+В наличии имеются таблички с номером дома из алюминиевого композита
+[072/100] item_id=2338448501700 image_id=52121377667 61.5s 927 chars | Картофелеочиститель МКК-150-01 Cubitron
+
+✅ Официальный дилер Abat в России
+✅ Новый оборудование 2025 года
+✅ Гарантия до 2 лет
+✅ Работаем с ю
+[073/100] item_id=2350441001500 image_id=51319105867 22.0s 281 chars | Бренд: Frenkit, артикул: 243932, Ремкомплект Тормозного Суппорта + Поршень KIA Sorento I 02>. 
+Все заказы оформляются только через Авито дос
+[074/100] item_id=2338466001200 image_id=52123550898 16.4s 171 chars | Продам джинсы, штаны, лосины, утепленные для девочки 2-3 лет. 
+Глория Джинс, Sinsay, Waikiki, Baby Go. 
+Размер 86-92, 98, 104. 
+Чёрные, рене
+[075/100] item_id=2303350500100 image_id=51255833740 24.0s 343 chars | Продаются тросы ручного тормоза для автомобилей ВАЗ-Калина-1118/1119, Гранта-2190, Приора-2170, ВАЗ-2110, ВАЗ-21. 
+Каждый трос имеет длину 1
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 75 filled: 75 errors: 0
+[076/100] item_id=2225925003100 image_id=48887610209 6.0s 69 chars | Рубашка Ralph Lauren в отличном состоянии, мягкая, приятная на ощупь.
+[077/100] item_id=2202825002200 image_id=51567999594 32.1s 569 chars | Кухня угловая молочного серого цвета с современным дизайном. Размеры: 277*206*60 см. Внутри кухни установлены стильные шкафы, которые обеспе
+[078/100] item_id=2287047750100 image_id=52858849229 61.8s 566 chars | Бренд: Auto Technologies Group, артикул: AT5131200BP, Колодки торм. диск. зад. CHEVROLET LACETTI 04>. 
+✅ ГАPАНTИЯ НА РAБОТЧИЙ ДВИГАТЕЛЬ
+✅ БЕ
+[079/100] item_id=2236794502400 image_id=49305082059 61.8s 1007 chars | Пенка Kia Opirus 1 передняя левая
+
+✅ Оплата: наличными, переводом, картой, QR-кодом, по счету для ЮР лиц с НДС 5%.
+✅ Доставка: СДЭК, Почта Р
+[080/100] item_id=2294270750100 image_id=50981865097 14.1s 228 chars | Продается серое вязаное пончо с оригинальным дизайном. Размер 38 (XXS), что делает его универсальным выбором для разных фигур. В отличном со
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 80 filled: 80 errors: 0
+[081/100] item_id=2334190000900 image_id=51986713431 61.9s 823 chars | Зеркало Nissan Qashqai 13-22 (Справа/ Обогрев/ Регулировка/ Повторитель поворота/ Складывание) 
+
+✅ ГАPАНTИЯ НА РAБОTУ ЗАПЧАСТИ ДО 2 ЛЕТ
+
+✅ Д
+[082/100] item_id=2351500001900 image_id=52025905436 62.3s 1008 chars | Пароконвектомат UNOX XEVC-1011-EZRM
+
+Пароконвектомат UNOX XEVC-1011-EZRM — это профессиональное оборудование для приготовления блюд из мяса,
+[083/100] item_id=2351451502600 image_id=52571657190 61.9s 1075 chars | Пенобетон, Газобетон D300, D350, D400, D500, D600
+
+В наличии большой ассортимент строительных материалов для вашего строительства и ремонта!
+[084/100] item_id=2140228750700 image_id=45379483059 61.8s 528 chars | Артикул товара №00005614
+
+Лючок топливного бака Audi A8 D4 4H0809857B (копия)
+
+Марка: Audi
+Модель: A8 D4
+
+Год: 2011
+
+Разборочный номер автом
+[085/100] item_id=2164179750100 image_id=46405631296 61.2s 1324 chars | Продаётся 1-комнатная квартира в новостройке «Элит Дом» от НАЖК! 
+
+📍 Адрес: Майская, 30
+
+✅ Осуществляем строительство под ключ!
+
+✅ Собственн
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 85 filled: 85 errors: 0
+[086/100] item_id=2298792251000 image_id=51116649329 11.1s 148 chars | Продам левый наушник AirPods 1. 
+Все работает идеально, но правый наушник сломан. 
+Комплектация: наушник + кейс. 
+Активно использовались око
+[087/100] item_id=2145285501800 image_id=45638485521 61.3s 1112 chars | Кухонный гарнитур "Светлана" от ALMIRA
+
+Кухонный гарнитур "Светлана" от ALMIRA — это идеальное сочетание функциональности и элегантного диза
+[088/100] item_id=2138028000600 image_id=45392227545 61.9s 824 chars | Бренд: HAVAL, артикул: 4133400XKV08A, Фара задняя нижняя правая в сборе. 
+✅ ГАPАНTИЯ НА РАБОТЫ ЗАПЧАСТИ ДО 2 ЛЕТ
+✅ ДOCTАВКА ПО ВСЕЙ PОCСИИ И
+[089/100] item_id=2159531252400 image_id=46210362488 62.3s 878 chars | Плиты аэродромные 6000х2000
+
+✅ Бесплатный выезд замерщика на объект
+✅ Готовые изделия в наличии
+✅ Оплата только после получения
+✅ Работаем с
+[090/100] item_id=2285020750300 image_id=50693472938 61.8s 979 chars | Обложка на свидетельство о браке в рустикальном стиле. Внутри свидетельство, на свидетельство, на свидетельство, на свидетельство, на свидет
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 90 filled: 90 errors: 0
+[091/100] item_id=2377531250800 image_id=52776565047 62.2s 1043 chars | Модульный паркет Marco Ferutti Linea Дуб Неро
+
+🔥 В наличии! 🔥
+
+Паркетная доска Marco Ferutti Linea Дуб Неро — это стильное решение для созда
+[092/100] item_id=2044810250500 image_id=42444290821 38.8s 536 chars | Бренд: Stellox, артикул: 158 1978-SX, Привод левый 662mm, 25139 158 1978-SX Stellox. 
+Все заказы оформляются только через Авито доставку!
+До
+[093/100] item_id=2279354751200 image_id=50523345467 8.2s 88 chars | God of war 3, Uncharted 4, Horizon zero dawn, Призрак Цусимы, Человек паук Майлз Моралес
+[094/100] item_id=2303985251200 image_id=51272759511 61.7s 902 chars | Артикул запчасти: 20926591.
+
+Пружина подвески  зад. Dodge Grand Caravan 2010-2019 ERB 2    Марка: Dodge
+Модель: Grand Caravan 2010-2019
+Год:
+[095/100] item_id=2301853750300 image_id=51186882699 14.4s 264 chars | Новые ботинки с мехом, размер 40. Подходят для зимнего сезона благодаря устойчивому дизайну и качественному исполнению. Мех обеспечивает ком
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 95 filled: 95 errors: 0
+[096/100] item_id=2298187500100 image_id=51227821915 62.2s 1528 chars | Продаётся коммунальная квартира в новостройке 1907 года, в которой есть всё необходимое для комфортного проживания. В квартире есть два окна
+[097/100] item_id=2258327750500 image_id=49846073589 45.2s 637 chars | Бренд: Zekkert, артикул: aw-5657, Привод в сборе | передн. прав. | Toyota Corolla (E120) 01>. 
+✅ Бесплатная доставка до транспортной компани
+[098/100] item_id=2306508000400 image_id=51308938925 13.9s 266 chars | Продаются брюки чиносы Mango, размер 152 см. Изготовлены из качественного материала, обеспечивающего комфорт при носке. Подходят для различн
+[099/100] item_id=2178510250200 image_id=50615530695 33.4s 542 chars | Продам свой автомобиль Lada Granta 1.6 MT, в хорошем состоянии, без серьезных проблем. 
+Владелец авто 2 человека, с 2019 года. 
+Автомобиль о
+[100/100] item_id=2311105000200 image_id=51209935941 17.7s 224 chars | Ваза для цветов из стекла Bohemia (Чехия). Изготовлено в Чехословакии, времен СССР. 
+Высота - 20.5 см, диаметр - 8 см. 
+Синий цвет и тонкие 
+partial saved: /kaggle/working/val_ckpt_step_3000.partial.json records: 100 filled: 100 errors: 0
+Готово:
+{
+  "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+  "checkpoint_dir": "/kaggle/input/datasets/kotshubin/aaa-vlm-sft-checkpoints/checkpoints/ckpt-step-3000",
+  "checkpoint_step": 3000,
+  "valid_csv": "/kaggle/input/datasets/kotshubin/aaa-1image-dataset-30k/valid_with_params.csv",
+  "rows": 100,
+  "filled": 100,
+  "errors": 0,
+  "output_json": "/kaggle/working/val_ckpt_step_3000.json",
+  "partial_json": "/kaggle/working/val_ckpt_step_3000.partial.json",
+  "generation_kwargs": {
+    "max_new_tokens": 384,
+    "do_sample": true,
+    "temperature": 0.3,
+    "top_p": 0.7,
+    "repetition_penalty": 1.05
+  },
+  "elapsed_min": 71.12
+}
+
+
+CELL 8 code
+from IPython.display import display
+
+print("Sanity check: первые 3 объекта valid с ответами модели")
+for rec in records[:3]:
+    image_id = int(rec["image_id"])
+    print("=" * 100)
+    print("item_id:", rec.get("item_id"), "image_id:", image_id)
+    print("title:", rec.get("title"))
+    print("category_name:", rec.get("category_name"))
+    print("params:", rec.get("params"))
+    print("qwen_sft_response:", rec.get("qwen_sft_response"))
+    if rec.get("qwen_sft_error"):
+        print("qwen_sft_error:", rec.get("qwen_sft_error"))
+    with Image.open(image_path_by_id[image_id]) as img:
+        display(img.convert("RGB"))
+
+print("Output files:")
+for p in sorted(WORKING_ROOT.glob("val_ckpt_step_*.json")):
+    print(p, p.stat().st_size, "bytes")
+
+Sanity check: первые 3 объекта valid с ответами модели
+====================================================================================================
+item_id: 2378334500700 image_id: 53318963226
+title: Ремешок для Garmin Quickfit 26mm, красный
+category_name: Личные вещи
+params: {"бренд": "NNNB", "модель": "For Garmin Fenix 5/5X", "ширина": "26mm", "цвет": "Красный", "пол": "Унисекс", "состояние": "Новый, без бирок", "материал": "Силикон", "совместимая_марка": "Гармин"}
+qwen_sft_response: Характеристики модели
+
+— Цвет ремешка: Красный
+— Ширина: 26mm
+
+Общие характеритики
+
+— Название бренда: NNNB
+— Номер модели: For Garmin Fenix 5/5X
+— Происхождение: Китай
+— Пол: Унисекс
+— Тип товара: Ремешок для часов
+— Совместимая марка: Гармин
+— Тип материала: Силикон
+— Единица измерения: штука/штуки
+— Количество: 1
+— Тип: ремешок
+— Состояние: Новый, без бирок
+— Тип товара: ремешок для часов
+— Тип материала: силикон
+— Пол: Унисекс
+— Совместимая марка: Гармин
+— Тип: ремешок для часов
+— Тип материала: силикон
+— Пол: Унисекс
+— Совместимая марка: Гармин
+— Тип: ремешок для часов
+— Тип материала: силикон
+— Пол: Унисекс
+— Совместимая марка: Гармин
+— Тип: ремешок для часов
+— Тип материала: силикон
+— Пол: Унисекс
+— Совместимая марка: Гармин
+— Тип: ремешок для часов
+— Тип материала: силикон
+— Пол: Унисекс
+— Совместимая марка: Гармин
+— Тип: ремешок для часов
+— Тип материала: силикон
+
+
+
+<PIL.Image.Image image mode=RGB size=480x480>
+====================================================================================================
+item_id: 2199744251400 image_id: 47771469743
+title: Приборная панель мопед альфа
+category_name: Транспорт
+params: {"категория": "Транспорт", "тип": "мопед", "бренд": "альфа", "состояние": "б/у", "комплектация": "приборная панель"}
+qwen_sft_response: Продам приборную панель мопеда альфа. 
+В хорошем состоянии, без видимых повреждений.
+
+
+
+<PIL.Image.Image image mode=RGB size=360x480>
+====================================================================================================
+item_id: 2342625000700 image_id: 52247113010
+title: Водяной насос C7; 3126 352-2139
+category_name: Транспорт
+params: {"бренд": "C7", "модель": "3126", "артикул": "352-2139", "состояние": "новый", "применение": "ДВС"}
+qwen_sft_response: Новый водяной насос C7; 3126 352-2139
+
+В наличии на складе в Москве, доставка в день заказа.
+
+ДВС, двигатель, насос, водяной, водяной насос, насос водяной, насос водяной C7; 3126 352-2139, насос водяной C7; 3126 352-2139 3126, насос водяной C7; 3126 352-2139 3126 352-2139, насос водяной C7; 3126 352-2139 3126 352-2139 3126, насос водяной C7; 3126 352-2139 3126 352-2139 3126 352-2139, насос водяной C7; 3126 352-2139 3126 352-2139 3126 352-2139 3126, насос водяной C7; 3126 352-2139 3126 352-2139 3126 352-2139 3126 352-2139, насос водяной C7; 3126
+
+
+
+<PIL.Image.Image image mode=RGB size=270x480>
+Output files:
+/kaggle/working/val_ckpt_step_3000.json 418687 bytes
+/kaggle/working/val_ckpt_step_3000.partial.json 418687 bytes
+/kaggle/working/val_ckpt_step_3000.summary.json 628 bytes
+

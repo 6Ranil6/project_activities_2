@@ -1,0 +1,720 @@
+CELL 0 markdown
+# Avito Description Generator — CLIP + ruGPT3Large (VisionEncoderDecoder)
+CELL 1 code
+cd ..
+/kaggle
+
+
+CELL 2 code
+cd /kaggle/input/datasets/ranilhayaliev/aaa-description
+/kaggle/input/datasets/ranilhayaliev/aaa-description
+
+
+CELL 3 code
+!pip install -q transformers datasets accelerate dagshub mlflow sentencepiece
+!pip install -q -U bitsandbytes
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m49.4/49.4 kB[0m [31m3.3 MB/s[0m eta [36m0:00:00[0m
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m50.2/50.2 kB[0m [31m3.3 MB/s[0m eta [36m0:00:00[0m
+[2K     [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m43.5/43.5 kB[0m [31m3.2 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m273.1/273.1 kB[0m [31m18.0 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m10.8/10.8 MB[0m [31m101.6 MB/s[0m eta [36m0:00:00[0m00:01[0m0:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m3.4/3.4 MB[0m [31m105.4 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m1.7/1.7 MB[0m [31m68.8 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m68.2/68.2 kB[0m [31m5.3 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m114.9/114.9 kB[0m [31m10.1 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m212.0/212.0 kB[0m [31m16.7 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m86.3/86.3 kB[0m [31m4.1 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m132.2/132.2 kB[0m [31m10.8 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m12.2/12.2 MB[0m [31m109.0 MB/s[0m eta [36m0:00:00[0m00:01[0m0:01[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m912.3/912.3 kB[0m [31m53.1 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m214.9/214.9 kB[0m [31m18.6 MB/s[0m eta [36m0:00:00[0m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m89.9/89.9 kB[0m [31m7.6 MB/s[0m eta [36m0:00:00[0m
+[?25h[31mERROR: pip's dependency resolver does not currently take into account all the packages that are installed. This behaviour is the source of the following dependency conflicts.
+ydata-profiling 4.18.4 requires dacite<2,>=1.9, but you have dacite 1.6.0 which is incompatible.
+ydata-profiling 4.18.4 requires numba<0.63,>=0.60, but you have numba 0.65.1 which is incompatible.
+ydata-profiling 4.18.4 requires numpy<2.4,>=1.22, but you have numpy 2.4.6 which is incompatible.
+dask-cuda 26.2.0 requires cuda-core==0.3.*, but you have cuda-core 1.0.1 which is incompatible.
+dask-cuda 26.2.0 requires numba-cuda<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+distributed-ucxx-cu12 0.48.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+cuml-cu12 26.2.0 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.
+cuml-cu12 26.2.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+ucxx-cu12 0.48.0 requires numba-cuda[cu12]<0.23.0,>=0.22.1, but you have numba-cuda 0.30.2 which is incompatible.
+cudf-cu12 26.2.1 requires numba<0.62.0,>=0.60.0, but you have numba 0.65.1 which is incompatible.
+cudf-cu12 26.2.1 requires numba-cuda[cu12]<0.23.0,>=0.22.2, but you have numba-cuda 0.30.2 which is incompatible.[0m[31m
+[2K   [90m━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[0m [32m60.7/60.7 MB[0m [31m32.8 MB/s[0m eta [36m0:00:00[0m:00:01[0m00:01[0m
+[?25h
+
+CELL 4 code
+import os, json
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+from PIL import Image
+from sklearn.model_selection import train_test_split
+import mlflow
+# import dagshub
+
+from transformers import (
+    VisionEncoderDecoderModel,
+    AutoTokenizer,
+    CLIPImageProcessor,
+    Seq2SeqTrainer,
+    Seq2SeqTrainingArguments,
+    AutoConfig,
+    default_data_collator,
+)
+from transformers import CLIPVisionModel, GPT2LMHeadModel
+
+print("Torch:", torch.__version__, "| CUDA:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("GPU:", torch.cuda.get_device_name(0),
+          f"| VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+Torch: 2.10.0+cu128 | CUDA: True
+GPU: Tesla T4 | VRAM: 15.6 GB
+
+
+CELL 5 code
+RANDOM_STATE   = 42
+PROJECT_DIR    = '/kaggle/input/datasets/ranilhayaliev/aaa-description'
+TRAIN_PATH     = os.path.join(PROJECT_DIR, 'train_with_params.csv')
+VALID_PATH     = os.path.join(PROJECT_DIR, 'valid_with_params.csv')
+IMAGES_DIR     = os.path.join(PROJECT_DIR, 'mini_images', 'mini_images')
+MICROCAT_PATH  = os.path.join(PROJECT_DIR, 'dwh_dma_current_microcategories.csv')
+OUTPUT_DIR     = '/kaggle/working/avito-clip-rugpt-checkpoints'
+
+MODEL_NAME_CLIP = 'openai/clip-vit-base-patch32'
+MODEL_NAME_GPT  = 'sberbank-ai/rugpt3large_based_on_gpt2'
+
+MAX_LENGTH = 192 # 512
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+CELL 6 code
+DAGSHUB_USERNAME = "6Ranil6"
+DAGSHUB_TOKEN    = "730182c7d68886c36abdac6463b2317248517987"
+
+os.environ["MLFLOW_TRACKING_USERNAME"] = DAGSHUB_USERNAME
+os.environ["MLFLOW_TRACKING_PASSWORD"] = DAGSHUB_TOKEN
+
+mlflow.set_tracking_uri(
+    f"https://dagshub.com/{DAGSHUB_USERNAME}/aaa-description.mlflow"
+)
+mlflow.set_experiment("Avito_CLIP_ruGPT_Large_v2")
+
+<Experiment: artifact_location='mlflow-artifacts:/e4ed9027954446f2ba37c1b35e037971', creation_time=1779578470703, effective_trace_archival_retention=None, experiment_id='2', last_update_time=1779578470703, lifecycle_stage='active', name='Avito_CLIP_ruGPT_Large_v2', tags={}, trace_location=None, workspace='default'>
+CELL 7 code
+train_df = pd.read_csv(TRAIN_PATH).sample(10000)
+val_df = pd.read_csv(VALID_PATH)
+for _df in [train_df, val_df]:
+    if 'Unnamed: 0' in _df.columns:
+        _df.drop(columns=['Unnamed: 0'], inplace=True)
+
+m_df = pd.read_csv(MICROCAT_PATH, header=None)
+microcat_map = {row[2]: f"{row[1]} > {row[4]} > {row[5]}" for _, row in m_df.iterrows()}
+
+print(f"Датасет (train): {len(train_df)} строк")
+print(f"Датасет (valid): {len(val_df)} строк")
+print(f"Микрокатегорий: {len(microcat_map)}")
+train_df.head(2)
+Датасет (train): 10000 строк
+Датасет (valid): 100 строк
+Микрокатегорий: 3603
+
+
+
+             item_id     image_id  \
+28678  2316051250100  51493369474   
+11195  2165225002000  46445226772   
+
+                                                   title  \
+28678   Современная модульная кухня с фасадами мдф новая   
+11195  Сборки игровых пк AMD5600-RX7600XT-32DDR4-ZPG2...   
+
+                                             description  category_id  \
+28678  🔥6 лет на Авито! | ⭐Рейтинг 4,8 звезды | 💙Боль...           38   
+11195  🔵 Внимание!!! Модели комплектующих указанные в...           36   
+
+         category_name   microcat_id               microcat_name  \
+28678  Для дома и дачи  416567250001                       Кухни   
+11195      Электроника  405806250001  Неизвестная микрокатегория   
+
+       itemstatus_id    price  imagescount isshop  iscompany  \
+28678              7  16500.0           10    NaN       True   
+11195              9  59200.0            7    NaN       True   
+
+       hasbusinessprofile  reputationscore                starttime  \
+28678                True           0.9895  2026-03-01 07:03:32.662   
+11195                True              NaN  2025-08-13 10:20:13.487   
+
+       quality_score  in_filtered_dataset  split  \
+28678       0.506036                False  train   
+11195       0.425371                False  train   
+
+                                                  params  
+28678  {"Категория": "Для дома и дачи", "Бренд": "Сур...  
+11195  {"Бренд": "GIGABYTE", "Модель": "Ryzen 5 5600"...  
+CELL 8 code
+def build_prompt(row, microcat_map):
+    m_id = row.get('microcat_id')
+    cat_info = microcat_map.get(m_id,
+        f"{row.get('category_name', 'Электроника')} > {row.get('microcat_name', '')}")
+
+    price = f"{int(row['price'])} руб." if pd.notna(row.get('price')) else "не указана"
+
+    if pd.notna(row.get('reputationscore')):
+        reputation = f"{row['reputationscore']:.2f}"
+    else:
+        reputation = "нет рейтинга"
+
+    if pd.notna(row.get('quality_score')):
+        quality = f"{row['quality_score']:.2f}"
+    else:
+        quality = "нет оценки"
+
+    seller_type = "частное лицо"
+    if str(row.get('iscompany')).lower() == 'true':
+        seller_type = "компания"
+    elif str(row.get('isshop')).lower() == 'true':
+        seller_type = "магазин"
+
+    optional_parts = []
+    if pd.notna(row.get('imagescount')):
+        optional_parts.append(f"Количество фото: {int(row['imagescount'])}")
+    if pd.notna(row.get('hasbusinessprofile')):
+        status = "бизнес-профиль" if str(row['hasbusinessprofile']).lower() == 'true' else "обычный профиль"
+        optional_parts.append(f"Статус: {status}")
+    if pd.notna(row.get('starttime')):
+        optional_parts.append(f"Дата: {row['starttime']}")
+
+    params_str = ""
+    if pd.notna(row.get('params')):
+        try:
+            p = json.loads(row['params']) if isinstance(row['params'], str) else row['params']
+            params_str = "Характеристики: " + ", ".join(f"{k}: {v}" for k, v in p.items()) + ".\n"
+        except Exception:
+            pass
+
+    prompt = (
+        f"Данные товара:\n"
+        f"Заголовок: {row['title']}.\n"
+        f"Категория: {cat_info}.\n"
+        f"Цена: {price}.\n"
+        f"Рейтинг: {reputation}.\n"
+        f"Качество: {quality}.\n"
+        f"Тип продавца: {seller_type}.\n"
+        f"{'. '.join(optional_parts)}.\n"
+        f"{params_str}"
+        f"ЗАДАНИЕ: Напиши продающее описание товара.\n"
+        f"ВАЖНО: НЕ упоминай цену, рейтинг и системные оценки.\n"
+        f"Описание:"
+    )
+    return prompt
+CELL 9 code
+class AvitoDataset(Dataset):
+    def __init__(self, df, tokenizer, feature_extractor, images_dir,
+                 microcat_map, max_length=MAX_LENGTH):
+        self.df = df.reset_index(drop=True)
+        self.tokenizer = tokenizer
+        self.feature_extractor = feature_extractor
+        self.images_dir = images_dir
+        self.microcat_map = microcat_map
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+
+        img_path = os.path.join(self.images_dir, f"{row['image_id']}.jpg")
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except Exception:
+            return None
+        pixel_values = self.feature_extractor(
+            images=image, return_tensors="pt"
+        ).pixel_values.squeeze(0)
+
+        prompt_text = build_prompt(row, self.microcat_map)
+        target_text = str(row.get('description', ''))
+
+        prompt_ids = self.tokenizer.encode(
+            self.tokenizer.bos_token + prompt_text,
+            add_special_tokens=False,
+        )
+        prompt_len = len(prompt_ids)
+
+        full_text = (
+            self.tokenizer.bos_token + prompt_text
+            + " " + target_text
+            + self.tokenizer.eos_token
+        )
+        enc = self.tokenizer(
+            full_text,
+            max_length=self.max_length,
+            padding="max_length",
+            truncation=True,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )
+        input_ids      = enc.input_ids.squeeze(0)       
+        attention_mask = enc.attention_mask.squeeze(0)  
+
+        labels = input_ids.clone()
+        labels[:prompt_len] = -100                          
+        labels[labels == self.tokenizer.pad_token_id] = -100  
+
+        return {
+            "pixel_values":  pixel_values,
+            "input_ids":     input_ids,    
+            "attention_mask": attention_mask,
+            "labels":        labels,
+        }
+
+
+def collate_fn(batch):
+    batch = [x for x in batch if x is not None]
+    return default_data_collator(batch)
+
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_GPT)
+tokenizer.pad_token = tokenizer.eos_token
+feature_extractor = CLIPImageProcessor.from_pretrained(MODEL_NAME_CLIP)
+
+
+train_dataset = AvitoDataset(train_df, tokenizer, feature_extractor, IMAGES_DIR, microcat_map)
+val_dataset   = AvitoDataset(val_df,   tokenizer, feature_extractor, IMAGES_DIR, microcat_map)
+
+sample = train_dataset[0]
+if sample:
+    print("pixel_values:", sample['pixel_values'].shape)
+    print("input_ids:   ", sample['input_ids'].shape)
+    print("labels non-masked:", (sample['labels'] != -100).sum().item(), "токенов")
+    target_tokens = sample['labels'][sample['labels'] != -100]
+    print("Целевой текст (первые 200 символов):", tokenizer.decode(target_tokens)[:200])
+else:
+    print("Первый пример вернул None — проверь путь к изображениям")
+
+config.json:   0%|          | 0.00/622 [00:00<?, ?B/s]
+
+tokenizer_config.json: 0.00B [00:00, ?B/s]
+
+vocab.json: 0.00B [00:00, ?B/s]
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+
+
+
+merges.txt: 0.00B [00:00, ?B/s]
+
+special_tokens_map.json:   0%|          | 0.00/574 [00:00<?, ?B/s]
+
+preprocessor_config.json:   0%|          | 0.00/316 [00:00<?, ?B/s]
+pixel_values: torch.Size([3, 224, 224])
+input_ids:    torch.Size([192])
+labels non-masked: 0 токенов
+Целевой текст (первые 200 символов): 
+
+
+CELL 10 code
+config_decoder = AutoConfig.from_pretrained(MODEL_NAME_GPT)
+config_decoder.is_decoder = True
+config_decoder.add_cross_attention = True
+
+encoder = CLIPVisionModel.from_pretrained(MODEL_NAME_CLIP, torch_dtype=torch.float16)
+decoder = GPT2LMHeadModel.from_pretrained(MODEL_NAME_GPT, torch_dtype=torch.float16, config=config_decoder)
+
+model = VisionEncoderDecoderModel(encoder=encoder, decoder=decoder)
+model.enc_to_dec_proj = model.enc_to_dec_proj.float()
+model.encoder = model.encoder.float()
+model.half()
+import gc
+gc.collect()
+torch.cuda.empty_cache()
+
+model.config.decoder_start_token_id = tokenizer.bos_token_id
+model.config.pad_token_id          = tokenizer.pad_token_id
+model.config.eos_token_id          = tokenizer.eos_token_id
+model.config.is_encoder_decoder    = True
+
+for param in model.encoder.parameters():
+    param.requires_grad = False
+
+for name, param in model.named_parameters():
+    if any(k in name for k in ['enc_to_dec_proj', 'crossattention', 'cross_attn']):
+        param.requires_grad = True
+
+total     = sum(p.numel() for p in model.parameters())
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f"Всего параметров:    {total / 1e6:.1f}M")
+print(f"Обучаемых:           {trainable / 1e6:.1f}M")
+print(f"Заморожено (CLIP):   {(total - trainable) / 1e6:.1f}M")
+
+config.json: 0.00B [00:00, ?B/s]
+
+pytorch_model.bin:   0%|          | 0.00/605M [00:00<?, ?B/s]
+
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+CLIPVisionModel LOAD REPORT from: openai/clip-vit-base-patch32
+Key                                                          | Status     |  | 
+-------------------------------------------------------------+------------+--+-
+text_model.encoder.layers.{0...11}.self_attn.out_proj.weight | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.mlp.fc1.bias              | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.k_proj.bias     | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.q_proj.weight   | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.out_proj.bias   | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.mlp.fc2.bias              | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.v_proj.weight   | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.q_proj.bias     | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.layer_norm1.bias          | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.layer_norm2.bias          | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.mlp.fc1.weight            | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.v_proj.bias     | UNEXPECTED |  | 
+text_projection.weight                                       | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.layer_norm1.weight        | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.mlp.fc2.weight            | UNEXPECTED |  | 
+text_model.embeddings.position_ids                           | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.layer_norm2.weight        | UNEXPECTED |  | 
+text_model.embeddings.token_embedding.weight                 | UNEXPECTED |  | 
+text_model.encoder.layers.{0...11}.self_attn.k_proj.weight   | UNEXPECTED |  | 
+vision_model.embeddings.position_ids                         | UNEXPECTED |  | 
+text_model.embeddings.position_embedding.weight              | UNEXPECTED |  | 
+logit_scale                                                  | UNEXPECTED |  | 
+text_model.final_layer_norm.weight                           | UNEXPECTED |  | 
+visual_projection.weight                                     | UNEXPECTED |  | 
+text_model.final_layer_norm.bias                             | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+
+
+
+model.safetensors:   0%|          | 0.00/605M [00:00<?, ?B/s]
+
+pytorch_model.bin:   0%|          | 0.00/3.14G [00:00<?, ?B/s]
+
+Loading weights:   0%|          | 0/293 [00:00<?, ?it/s]
+The tied weights mapping and config for this model specifies to tie transformer.wte.weight to lm_head.weight, but both are present in the checkpoints, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning
+GPT2LMHeadModel LOAD REPORT from: sberbank-ai/rugpt3large_based_on_gpt2
+Key                                                 | Status     | 
+----------------------------------------------------+------------+-
+transformer.h.{0...23}.attn.masked_bias             | UNEXPECTED | 
+transformer.h.{0...23}.attn.bias                    | UNEXPECTED | 
+transformer.h.{0...23}.crossattention.c_proj.bias   | MISSING    | 
+transformer.h.{0...23}.crossattention.q_attn.bias   | MISSING    | 
+transformer.h.{0...23}.ln_cross_attn.bias           | MISSING    | 
+transformer.h.{0...23}.crossattention.c_proj.weight | MISSING    | 
+transformer.h.{0...23}.crossattention.c_attn.bias   | MISSING    | 
+transformer.h.{0...23}.crossattention.q_attn.weight | MISSING    | 
+transformer.h.{0...23}.ln_cross_attn.weight         | MISSING    | 
+transformer.h.{0...23}.crossattention.c_attn.weight | MISSING    | 
+
+Notes:
+- UNEXPECTED	:can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+- MISSING	:those params were newly initialized because missing from the checkpoint. Consider training on your downstream task.
+
+
+Всего параметров:    1152.8M
+Обучаемых:           1065.4M
+Заморожено (CLIP):   87.5M
+
+
+CELL 11 code
+def estimate_memory(model):
+    params_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    buffers_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+    total_gb = (params_bytes + buffers_bytes) / 1e9
+    print(f"Модель в памяти: {total_gb:.2f} GB")
+    free, total = torch.cuda.mem_get_info()
+    print(f"GPU свободно: {free/1e9:.2f} GB / {total/1e9:.2f} GB")
+    print(f"Хватит на forward+backward (≈3x): {'Всё отлично' if free > total_gb * 3 * 1e9 else 'OOM вероятен'}")
+
+estimate_memory(model)
+Модель в памяти: 2.51 GB
+GPU свободно: 15.53 GB / 15.64 GB
+Хватит на forward+backward (≈3x): Всё отлично
+
+
+CELL 12 code
+os.environ["LD_LIBRARY_PATH"] = "/opt/conda/lib/"
+
+training_args = Seq2SeqTrainingArguments(
+    output_dir=OUTPUT_DIR,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=64,
+    dataloader_pin_memory=False,
+    per_device_eval_batch_size=1,
+    predict_with_generate=True,
+    eval_strategy="steps",
+    save_strategy="steps",
+    eval_steps=1000,              
+    save_steps=1000,              
+    save_total_limit=2,
+    logging_steps=100,            
+    num_train_epochs=1,           
+    learning_rate=4e-5,
+    warmup_steps=500,
+    fp16=False,                    
+    bf16=False,                    
+    gradient_checkpointing=True,
+    optim="adamw_bnb_8bit",        
+    report_to="mlflow",
+    load_best_model_at_end=True,
+    ddp_find_unused_parameters=True,
+    generation_max_length=MAX_LENGTH,
+)
+trainer = Seq2SeqTrainer(
+    model=model,
+    processing_class=tokenizer,
+    args=training_args,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+    data_collator=collate_fn,
+)
+
+with mlflow.start_run() as run:
+    mlflow.log_params({
+        "encoder": MODEL_NAME_CLIP,
+        "decoder": MODEL_NAME_GPT,
+        "max_length": MAX_LENGTH,
+        "lr": 4e-5,
+        "epochs": 5,
+    })
+    trainer.train()
+
+trainer.save_model(os.path.join(OUTPUT_DIR, "best_model"))
+tokenizer.save_pretrained(os.path.join(OUTPUT_DIR, "best_model"))
+The tokenizer has new PAD/BOS/EOS tokens that differ from the model config and generation config. The model config and generation config were aligned accordingly, being updated with the tokenizer's values. Updated tokens: {'bos_token_id': 1, 'pad_token_id': 2}.
+2026/06/08 11:02:03 ERROR mlflow.utils.async_logging.async_logging_queue: Run Id 45bb8b68e4b741648c887c64a77979bd: Failed to log run data: Exception: INVALID_PARAMETER_VALUE: Response: {'error_code': 'INVALID_PARAMETER_VALUE'}
+`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...
+`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...
+/usr/local/lib/python3.12/dist-packages/torch/autograd/function.py:583: UserWarning: Was asked to gather along dimension 0, but all input tensors were scalars; will instead unsqueeze and return a vector.
+  return super().apply(*args, **kwargs)  # type: ignore[misc]
+
+
+
+<IPython.core.display.HTML object>
+
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]
+🏃 View run honorable-mare-642 at: https://dagshub.com/6Ranil6/aaa-description.mlflow/#/experiments/2/runs/45bb8b68e4b741648c887c64a77979bd
+🧪 View experiment at: https://dagshub.com/6Ranil6/aaa-description.mlflow/#/experiments/2
+
+
+
+Writing model shards:   0%|          | 0/1 [00:00<?, ?it/s]
+
+('/kaggle/working/avito-clip-rugpt-checkpoints/best_model/tokenizer_config.json',
+ '/kaggle/working/avito-clip-rugpt-checkpoints/best_model/tokenizer.json')
+CELL 13 code
+!zip -r /kaggle/working/results.zip /kaggle/working/avito-clip-rugpt-checkpoints
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/ (stored 0%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/ (stored 0%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/optimizer.pt (deflated 28%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/tokenizer.json (deflated 84%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/generation_config.json (deflated 38%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/model.safetensors (deflated 8%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/trainer_state.json (deflated 56%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/tokenizer_config.json (deflated 47%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/scheduler.pt (deflated 61%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/rng_state.pth (deflated 26%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/training_args.bin (deflated 53%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/checkpoint-79/config.json (deflated 69%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/ (stored 0%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/tokenizer.json (deflated 84%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/generation_config.json (deflated 38%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/model.safetensors (deflated 8%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/tokenizer_config.json (deflated 47%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/training_args.bin (deflated 53%)
+  adding: kaggle/working/avito-clip-rugpt-checkpoints/best_model/config.json (deflated 69%)
+
+
+CELL 14 markdown
+## Инференс
+CELL 15 code
+BEST_MODEL_PATH = os.path.join(OUTPUT_DIR, "best_model")
+
+model_inf = VisionEncoderDecoderModel.from_pretrained(BEST_MODEL_PATH)
+tokenizer_inf = AutoTokenizer.from_pretrained(BEST_MODEL_PATH)
+tokenizer_inf.pad_token = tokenizer_inf.eos_token
+feature_extractor_inf = CLIPImageProcessor.from_pretrained(MODEL_NAME_CLIP)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+model_inf = model_inf.to(device)
+model_inf.eval()
+
+Loading weights:   0%|          | 0/686 [00:00<?, ?it/s]
+The tied weights mapping and config for this model specifies to tie decoder.transformer.wte.weight to decoder.lm_head.weight, but both are present in the checkpoints, so we will NOT tie them. You should update the config with `tie_word_embeddings=False` to silence this warning
+
+
+Модель готова, устройство: cuda
+
+
+CELL 16 code
+@torch.inference_mode()
+def generate_description(row, model, tokenizer, feature_extractor, microcat_map,
+                         max_new_tokens=250):
+    # Изображение
+    img_path = os.path.join(IMAGES_DIR, f"{row['image_id']}.jpg")
+    image = Image.open(img_path).convert("RGB")
+    pixel_values = feature_extractor(images=image, return_tensors="pt").pixel_values.to(device)
+
+    # Промпт
+    prompt_text = build_prompt(row, microcat_map)
+    full_prompt = tokenizer.bos_token + prompt_text
+    decoder_input_ids = tokenizer.encode(
+        full_prompt, return_tensors="pt", add_special_tokens=False
+    ).to(device)
+
+    output_ids = model.generate(
+        pixel_values=pixel_values,
+        decoder_input_ids=decoder_input_ids,
+        max_new_tokens=max_new_tokens,
+        num_beams=5,
+        no_repeat_ngram_size=3,
+        repetition_penalty=1.3,
+        early_stopping=True,
+        eos_token_id=tokenizer.eos_token_id,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+
+    new_tokens = output_ids[0][decoder_input_ids.shape[1]:]
+    return tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+
+
+test_rows = val_df.sample(3, random_state=42)
+for _, row in test_rows.iterrows():
+    print(f"\n{'='*60}")
+    print(f"ТОВАР: {row['title']}")
+    generated = generate_description(
+        row, model_inf, tokenizer_inf, feature_extractor_inf, microcat_map
+    )
+    print(f"\nГЕНЕРАЦИЯ:\n{generated}")
+    print(f"\nОРИГИНАЛ:\n{str(row['description'])[:400]}")
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+
+
+
+============================================================
+ТОВАР: Лючок топливного бака Audi A8 D4 4H0809857B
+
+ГЕНЕРАЦИЯ:
+Продаю лючок топливный бака Ауди А8 Д4 4Х080 9857 B.
+Лючок в хорошем состоянии, без сколов, царапин и потертостей.
+Продаю за наличный и безналичный расчет.
+Доставка по всей России.
+Возможен самовывоз со склада в Москве.
+Срок доставки 2-3 дня.
+Стоимость доставки зависит от удаленности от Москвы.
+При оформлении заказа на сайте, вы получаете скидку 10% на все товары.
+Если вы не можете забрать товар сами, мы можем отправить его транспортной компанией по вашему выбору.
+Также вы можете забрать его самовывозом с нашего склада.
+Забрать товар вы можете с понедельника по пятницу с 10:00 до 18:00 по адресу: г. Москва, ул. Верхняя Радищевская, д.2, стр.1.
+Тел: +7 (916) 990-77-55.
+E-mail: Этот e-mail защищен от спам-ботов. Для его просмотра в вашем браузере должна быть включена поддержка Java-script.
+Звоните, будем рады вам помочь!
+Внимание: HTML не поддерживается! Используйте обычный
+
+ОРИГИНАЛ:
+Лючок топливного бака  : 4H0809857B 4H4809857BАртикул: 00005614К автомобилю:  Audi D4 2011 год 4.2 FSI, кпп: Автомат, привод: Полный
+
+Разборочный номер автомобиля: 3666Компания StopGo предлагает широкий спектр автозапчастей бывших в употреблении к легковым автомобилям, внедорожникам, микроавтобусам без пробега по РФ. В наличии более 100 тыс запчастей. 
+Все фотографии реальных запчастей и соответст
+
+============================================================
+ТОВАР: Сценические фонтаны для пиро пульта 3м30сек
+
+ГЕНЕРАЦИЯ:
+Продающий заголовок: "Сценический фонтан 3 м30 сек.".
+Текст:
+1. Характеристики.
+2. Цена.
+3. Состояние.
+4. Гарантия.
+5. Фото.
+6. Видео.
+7. Контакты.
+8. Отзывы.
+9. Комментарии.
+10. Дополнительная информация.
+11. Условия доставки.
+12. Гарантийный срок.
+13. Условия оплаты.
+14. Условия самовывоза.
+15. Доставка по России.
+16. Оплата при получении.
+17. Возможен самовывоз.
+18. Предоплата.
+19. Безналичный расчет.
+20. Наложенный платеж.
+21. Доставка курьером.
+22. Самовывоз в Москве.
+23. Курьерская доставка.
+24. Почта РФ.
+25. Транспортной компанией.
+26. Транспортная компания "Деловые Линии".
+27. ТК "СДЭК".
+28. Доставка транспортными компаниями.
+29. Почтой России или EMS.
+30. Стоимость доставки зависит от суммы заказа.
+31. Срок доставки 1-3 дня.
+32
+
+ОРИГИНАЛ:
+Фонтаны сцeничecкие для пиротехничеcкогo пульта 3 метра 30 секунд в наличии. Идеально подходят для запуска на свадьбах и других мероприятиях + в наличии есть оборудование для запуска таких фонтанов. Особенность этой модели в том, что эти фонтаны хорошо видно даже днем при солнечном свете.
+
+🔥 3м30ceк (серебро) - 499 руб/шт
+
+Возможны скидки от количества
+
+- Есть так же и другие размеры.
+
+Достaвкa по
+
+============================================================
+ТОВАР: Таблички с номером дома из композита
+
+ГЕНЕРАЦИЯ:
+Таблички на дом - это отличный способ донести информацию о товаре или услуге до потенциального покупателя. Вы можете разместить их в любом удобном для вас месте: на фасаде дома, на заборе, на столбе, на стене, на двери и т.д.
+Вы можете заказать изготовление табличек на дом по индивидуальному дизайну.
+Срок изготовления: 1-2 дня.
+Стоимость указана за одну табличку.
+Гарантия: 1 год.
+Прайс-лист:
+https://www.livemaster.ru/topic/350445-tablichki-s-nomerom-doma-iz-kompozita-dlya-zagovora-i-dveri-na-stolke-v-moskve?utm_source=ljutmcampaign=%D1%81%D0%BE%20LIVEMEER
+
+Внимание! В связи с нестабильным курсом валют цены могут отличаться от указанных на сайте. Актуальные цены уточняйте у наших менеджеров.
+
+Примечание: HTML разметка
+
+ОРИГИНАЛ:
+Таблички с номером дома из композита
+<
+
+HАПИШИTЕ прямo CEЙЧAC CЛOBO "KATАЛОГ" и мы отпрaвим всe вaрианты табличек
+
+Изготовим адpeсную тaбличку из алюминиевoгo кoмпозита, плaстика, aкрилa, оpг стекла - любогo фoрмaтa!
+
+💥 НAШИ ПPЕИMУЩEСTBA:
+
+👍 Цены ниже чем у конкуpентов нa 20 – 30 % 👍
+
+👍 У нaс имeется бoльшой опыт в изготовлении адресных табличек, занимаемся данным делом более 10 лет 👍
+
+🚚 Доставим 
+
+
+CELL 17 markdown
+# Инференс
+CELL 18 code
+preds = []
+for idx, row in val_df.iterrows():
+    try:
+        gen = generate_description(row, model_inf, tokenizer_inf, feature_extractor_inf, microcat_map)
+    except Exception as e:
+        gen = ''
+    preds.append(gen)
+val_df['pred_description'] = preds
+OUT_PRED_PATH = os.path.join(OUTPUT_DIR, 'valid_predictions.csv')
+val_df.to_csv(OUT_PRED_PATH, index=False)
+print('Saved predictions to', OUT_PRED_PATH)
+Saved predictions to /kaggle/working/avito-clip-rugpt-checkpoints/valid_predictions.csv
+

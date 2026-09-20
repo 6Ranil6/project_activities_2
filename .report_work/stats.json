@@ -1,0 +1,268 @@
+{
+  "data/train_with_params.csv": {
+    "n": 30000,
+    "columns": [
+      "item_id",
+      "image_id",
+      "title",
+      "description",
+      "category_id",
+      "category_name",
+      "microcat_id",
+      "microcat_name",
+      "itemstatus_id",
+      "price",
+      "imagescount",
+      "isshop",
+      "iscompany",
+      "hasbusinessprofile",
+      "reputationscore",
+      "starttime",
+      "quality_score",
+      "in_filtered_dataset",
+      "split",
+      "params"
+    ],
+    "categories": {
+      "Личные вещи": 5920,
+      "Транспорт": 12885,
+      "Для дома и дачи": 5529,
+      "Недвижимость": 807,
+      "Электроника": 1969,
+      "Готовый бизнес и оборудование": 1052,
+      "Хобби и отдых": 1685,
+      "Животные": 153
+    },
+    "params_empty": 6,
+    "invalid_params": 0
+  },
+  "data/dataset_filtered_with_params_3k.csv": {
+    "n": 2937,
+    "columns": [
+      "item_id",
+      "image_id",
+      "title",
+      "description",
+      "category_id",
+      "category_name",
+      "microcat_id",
+      "microcat_name",
+      "itemstatus_id",
+      "price",
+      "imagescount",
+      "isshop",
+      "iscompany",
+      "hasbusinessprofile",
+      "reputationscore",
+      "starttime",
+      "quality_score",
+      "params"
+    ],
+    "categories": {
+      "Электроника": 594,
+      "Для дома и дачи": 396,
+      "Хобби и отдых": 396,
+      "Недвижимость": 429,
+      "Животные": 396,
+      "Личные вещи": 330,
+      "Транспорт": 330,
+      "Готовый бизнес и оборудование": 66
+    },
+    "params_empty": 11,
+    "invalid_params": 0
+  },
+  "data/valid_with_params.csv": {
+    "n": 100,
+    "columns": [
+      "item_id",
+      "image_id",
+      "title",
+      "description",
+      "category_id",
+      "category_name",
+      "microcat_id",
+      "microcat_name",
+      "itemstatus_id",
+      "price",
+      "imagescount",
+      "isshop",
+      "iscompany",
+      "hasbusinessprofile",
+      "reputationscore",
+      "starttime",
+      "quality_score",
+      "in_filtered_dataset",
+      "split",
+      "params"
+    ],
+    "categories": {
+      "Личные вещи": 20,
+      "Транспорт": 43,
+      "Для дома и дачи": 18,
+      "Электроника": 7,
+      "Хобби и отдых": 6,
+      "Недвижимость": 3,
+      "Готовый бизнес и оборудование": 3
+    },
+    "params_empty": 0,
+    "invalid_params": 0
+  },
+  "LLM_as_a_judge/vals/clean_val_qwen_base.csv": {
+    "n": 100,
+    "columns": [
+      "item_id",
+      "image_id",
+      "title",
+      "description",
+      "category_id",
+      "category_name",
+      "microcat_id",
+      "microcat_name",
+      "itemstatus_id",
+      "price",
+      "imagescount",
+      "isshop",
+      "iscompany",
+      "hasbusinessprofile",
+      "reputationscore",
+      "starttime",
+      "quality_score",
+      "in_filtered_dataset",
+      "split",
+      "params",
+      "qwen_base_response",
+      "qwen_base_error"
+    ],
+    "categories": {
+      "Личные вещи": 20,
+      "Транспорт": 43,
+      "Для дома и дачи": 18,
+      "Электроника": 7,
+      "Хобби и отдых": 6,
+      "Недвижимость": 3,
+      "Готовый бизнес и оборудование": 3
+    },
+    "params_empty": 0,
+    "invalid_params": 0,
+    "qwen_base_response": {
+      "nonempty": 100,
+      "pass": 86,
+      "avg_words": 24.27,
+      "violations": {
+        "Найдена ссылка на источник/фото": 14
+      }
+    }
+  },
+  "LLM_as_a_judge/vals/clean_val_qwen_sft_ckpt_step_3000.csv": {
+    "n": 100,
+    "columns": [
+      "item_id",
+      "image_id",
+      "title",
+      "description",
+      "category_id",
+      "category_name",
+      "microcat_id",
+      "microcat_name",
+      "itemstatus_id",
+      "price",
+      "imagescount",
+      "isshop",
+      "iscompany",
+      "hasbusinessprofile",
+      "reputationscore",
+      "starttime",
+      "quality_score",
+      "in_filtered_dataset",
+      "split",
+      "params",
+      "qwen_sft_response",
+      "qwen_sft_error",
+      "qwen_sft_seconds",
+      "checkpoint_step",
+      "checkpoint_name",
+      "model_id",
+      "generation_kwargs"
+    ],
+    "categories": {
+      "Личные вещи": 20,
+      "Транспорт": 43,
+      "Для дома и дачи": 18,
+      "Электроника": 7,
+      "Хобби и отдых": 6,
+      "Недвижимость": 3,
+      "Готовый бизнес и оборудование": 3
+    },
+    "params_empty": 0,
+    "invalid_params": 0,
+    "qwen_sft_response": {
+      "nonempty": 100,
+      "pass": 18,
+      "avg_words": 98,
+      "violations": {
+        "Описание должно быть одним абзацем": 78,
+        "Описание длиннее 70 слов": 65,
+        "Найдена ссылка на источник/фото": 1,
+        "Найдена markdown-разметка или список": 10
+      }
+    }
+  },
+  "LLM_as_a_judge/vals/clean_val_clip_gpt.csv": {
+    "n": 100,
+    "columns": [
+      "item_id",
+      "image_id",
+      "title",
+      "description",
+      "category_id",
+      "category_name",
+      "microcat_id",
+      "microcat_name",
+      "itemstatus_id",
+      "price",
+      "imagescount",
+      "isshop",
+      "iscompany",
+      "hasbusinessprofile",
+      "reputationscore",
+      "starttime",
+      "quality_score",
+      "in_filtered_dataset",
+      "split",
+      "params",
+      "pred_description"
+    ],
+    "categories": {
+      "Личные вещи": 20,
+      "Транспорт": 43,
+      "Для дома и дачи": 18,
+      "Электроника": 7,
+      "Хобби и отдых": 6,
+      "Недвижимость": 3,
+      "Готовый бизнес и оборудование": 3
+    },
+    "params_empty": 0,
+    "invalid_params": 0,
+    "pred_description": {
+      "nonempty": 100,
+      "pass": 0,
+      "avg_words": 108.51,
+      "violations": {
+        "Описание должно быть одним абзацем": 99,
+        "Описание длиннее 70 слов": 96,
+        "Найдена markdown-разметка или список": 11,
+        "Найдена ссылка": 27,
+        "Найден email": 12,
+        "Найден номер телефона": 53,
+        "Найден контакт": 14,
+        "Найдено запрещённое приветствие": 37,
+        "Найдена ссылка на источник/фото": 5
+      }
+    }
+  },
+  "intersections": {
+    "train_with_params.csv / valid_with_params.csv": 0,
+    "dataset_filtered_with_params_3k.csv / valid_with_params.csv": 0,
+    "clean_val_qwen_base.csv / valid_with_params.csv": 100
+  }
+}
